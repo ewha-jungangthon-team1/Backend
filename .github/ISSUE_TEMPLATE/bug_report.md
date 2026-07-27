@@ -7,14 +7,6 @@ assignees: ''
 
 ---
 
----
-name: Bug report
-about: 에러를 발견했어요.
-title: "ㅁㅁㅁㅁ API 403 Forbidden"
-labels: "bug🐛"
-assignees: ""
----
-
 ## 📄 API
 API 명세서에서 해당 문서를 찾아 링크를 붙여 넣으세요.
 
