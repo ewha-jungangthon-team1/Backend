@@ -37,6 +37,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'products',
+    'simulation',
+    'dpp',
+    'measurements',
 ]
 
 MIDDLEWARE = [
@@ -116,6 +121,9 @@ USE_I18N = True
 
 # 한국 날짜&숫자 형식
 USE_L10N = True
+
+# DB에는 UTC로 저장하고, TIME_ZONE 기준으로 표시/변환 (TIMESTAMPTZ 의도와 일치)
+USE_TZ = True
 
 
 # Static files (CSS, JavaScript, Images)

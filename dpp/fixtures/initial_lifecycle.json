@@ -1,0 +1,22 @@
+[
+  {
+    "model": "dpp.lifecyclerecord",
+    "pk": 1,
+    "fields": {
+      "bag": 1,
+      "record_type": "repair",
+      "description": "스트랩 재봉 수선 (시연용 가정 데이터)",
+      "recorded_at": "2026-05-10T09:00:00Z"
+    }
+  },
+  {
+    "model": "dpp.lifecyclerecord",
+    "pk": 2,
+    "fields": {
+      "bag": 1,
+      "record_type": "ownership_transfer",
+      "description": "중고 거래를 통한 소유권 이전 (시연용 가정 데이터)",
+      "recorded_at": "2026-06-20T14:30:00Z"
+    }
+  }
+]
