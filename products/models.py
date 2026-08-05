@@ -1,11 +1,11 @@
 import uuid
-
 from django.conf import settings
 from django.db import models
 
 
 class ProductModel(models.Model):
     brand = models.CharField(max_length=100)
+    model_image = models.ImageField(upload_to="products/", blank=True, null=True)
     model_name = models.CharField(max_length=100)
     material = models.CharField(max_length=100)
     care_guideline = models.JSONField()

@@ -1,7 +1,7 @@
 from django.urls import path
 
-from .views import BagDetailView
+from .views import PassportDetailView
 
 urlpatterns = [
-    path("passports/<uuid:public_token>/", BagDetailView.as_view(), name="bag-detail"),
+    path("passports/<uuid:public_token>/", PassportDetailView.as_view(), name="passport_detail"),
 ]
