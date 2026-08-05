@@ -1,0 +1,63 @@
+[
+  {
+    "model": "simulation.simulationscenario",
+    "pk": 1,
+    "fields": {
+      "code": "NORMAL_LIVE",
+      "name": "정상 상태 (라이브)",
+      "scenario_type": "NORMAL",
+      "mode": "LIVE",
+      "logical_duration_seconds": 180,
+      "sample_interval_seconds": 2,
+      "config": {
+        "phases": [
+          {"start_sec": 0, "end_sec": 180, "strap_load_target": 3.0}
+        ]
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "pk": 2,
+    "fields": {
+      "code": "OVERLOAD_LIVE",
+      "name": "과부하 상태 (라이브)",
+      "scenario_type": "OVERLOAD",
+      "mode": "LIVE",
+      "logical_duration_seconds": 180,
+      "sample_interval_seconds": 1,
+      "config": {
+        "phases": [
+          {"start_sec": 0, "end_sec": 60, "strap_load_target": 3.0},
+          {"start_sec": 60, "end_sec": 180, "strap_load_target": 9.5}
+        ]
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-01T00:00:00Z"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "pk": 3,
+    "fields": {
+      "code": "NORMAL_HISTORY",
+      "name": "정상 상태 (과거 기록)",
+      "scenario_type": "NORMAL",
+      "mode": "HISTORY",
+      "logical_duration_seconds": 14400,
+      "sample_interval_seconds": 300,
+      "config": {
+        "phases": [
+          {"start_sec": 0, "end_sec": 14400, "strap_load_target": 3.0}
+        ]
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-01T00:00:00Z"
+    }
+  }
+]
