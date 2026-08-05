@@ -7,8 +7,6 @@ class MeasurementSession(models.Model):
     class Purpose(models.TextChoices):
         LIVE = "live", "Live"
         HISTORY = "history", "History"
-        DEMO = "demo", "Demo"
-        TEST = "test", "Test"
 
     class Status(models.TextChoices):
         RUNNING = "RUNNING", "Running"
