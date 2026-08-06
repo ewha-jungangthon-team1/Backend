@@ -26,7 +26,8 @@ class MeasurementSession(models.Model):
     started_at = models.DateTimeField()
     ended_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices)
-
+    created_at = models.DateTimeField(auto_now_add=True)
+    
     def __str__(self):
         return f"Session({self.id}, {self.purpose}, {self.status})"
 
@@ -62,12 +63,8 @@ class SensorReading(models.Model):
             MinValueValidator(0),
         ],
     )
-
-    sequence = models.PositiveIntegerField()
-    class Meta:
-        constraints = [
-            models.UniqueConstraint(fields=["session", "sequence"], name="unique_session_sequence"),
-        ]
-        ordering = ["measured_at"]
+    
     def __str__(self):
         return f"Reading(session={self.session_id}, at={self.measured_at})"
+    created_at = models.DateTimeField(auto_now_add=True)
+    
