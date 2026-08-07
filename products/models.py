@@ -2,7 +2,6 @@ import uuid
 from django.conf import settings
 from django.db import models
 
-
 class ProductModel(models.Model):
     brand = models.CharField(max_length=100)
     model_image = models.ImageField(upload_to="ProductModel/image", blank=True, null=True)
