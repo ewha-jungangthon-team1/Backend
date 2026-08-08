@@ -52,7 +52,6 @@ class SensorReading(models.Model):
             MaxValueValidator(1),
         ],
     )
-
     # 가방 본체의 기준 상태 대비 변형률
     # 예: 0.0000 = 변형 없음, 0.0250 = 2.5% 변형
     body_deformation_ratio = models.DecimalField(
@@ -63,8 +62,14 @@ class SensorReading(models.Model):
             MinValueValidator(0),
         ],
     )
-    
+    sequence = models.PositiveIntegerField()
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields =["session","sequence"], name = "Unique_session")
+        ]
+        ordering = ["measured_at"]
+    created_at = models.DateTimeField(auto_now_add=True)
     def __str__(self):
         return f"Reading(session={self.session_id}, at={self.measured_at})"
-    created_at = models.DateTimeField(auto_now_add=True)
+    
     

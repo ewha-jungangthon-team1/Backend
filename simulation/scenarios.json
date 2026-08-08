@@ -18,7 +18,8 @@
         "moisture_event": {"enabled": false}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -40,7 +41,8 @@
         "moisture_event": {"enabled": false}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -62,7 +64,8 @@
         "moisture_event": {"enabled": false}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -84,7 +87,8 @@
         "moisture_event": {"enabled": false}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -106,7 +110,8 @@
         "moisture_event": {"enabled": false}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -128,7 +133,8 @@
         "moisture_event": {"enabled": false}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -150,7 +156,8 @@
         "moisture_event": {"enabled": true, "trigger_at_ratio": 0.7}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -172,7 +179,8 @@
         "moisture_event": {"enabled": true, "trigger_at_ratio": 0.7}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -194,7 +202,8 @@
         "moisture_event": {"enabled": true, "trigger_at_ratio": 0.5}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   },
   {
@@ -216,7 +225,8 @@
         "moisture_event": {"enabled": true, "trigger_at_ratio": 0.5}
       },
       "version": 1,
-      "is_active": true
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
     }
   }
 ]
