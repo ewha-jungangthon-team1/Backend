@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import MeasurementSession
+from measurements.models import MeasurementSession
 from .services import POLLING_INTERVAL_SECONDS, calculate_scheduled_end_at
 
 
