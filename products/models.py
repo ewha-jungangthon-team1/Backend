@@ -17,7 +17,7 @@ class Bag(models.Model):
     product_model = models.ForeignKey(ProductModel, on_delete=models.CASCADE, related_name="bags")
     owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="bags")
     serial_number = models.CharField(max_length=100, unique=True, blank=True, null=True)
-    nfc_uid = models.CharField(max_length=100,unique=True,)
+    nfc_uid = models.CharField(max_length=100,unique=True)
     public_token = models.UUIDField(default=uuid.uuid4, unique=True, editable=False)
     manufactured_at = models.DateField(blank=True, null=True)
     purchased_at = models.DateField(blank=True, null=True)

@@ -20,16 +20,10 @@ class PassportDetailView(APIView):
 
         # 기존 시리얼라이저 데이터 활용
         bag_data = BagDetailSerializer(bag).data
-        product_model_data = ProductModelSerializer(bag.product_model).data
 
         # 요구사항에 맞춘 JSON 구조 조합
         response_payload = {
-            "bag": bag_data,
-            "product_model": product_model_data,
-            "latest_report": {
-                "severity": "NORMAL",
-                "summary": "최근 적정한 사용 상태가 유지되고 있습니다."
-            }
+            "bag": bag_data
         }
 
         return Response(response_payload, status=status.HTTP_200_OK)
