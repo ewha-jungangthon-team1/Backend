@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Bag, ProductModel
+from .models import *
 
 
 class ProductModelSerializer(serializers.ModelSerializer):
@@ -13,3 +13,8 @@ class BagDetailSerializer(serializers.ModelSerializer):
     class Meta:
         model = Bag
         fields = ["public_token", "created_at", "product_model"]
+
+class LifecycleRecordSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LifecycleRecord
+        fields = ["id", "record_type", "description", "recorded_at"]

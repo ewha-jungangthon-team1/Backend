@@ -1,5 +1,6 @@
 from django.shortcuts import get_object_or_404
-from rest_framework.views import APIView
+from rest_framework.generics import ListAPIView
+from rest_framework.views import *
 from rest_framework.response import Response
 from rest_framework import status
 
@@ -28,3 +29,9 @@ class PassportDetailView(APIView):
 
         return Response(response_payload, status=status.HTTP_200_OK)
 
+class LifecycleListView(ListAPIView):
+    serializer_class = LifecycleRecordSerializer
+
+    def get_queryset(self):
+        bag = get_object_or_404(Bag, public_token=self.kwargs["public_token"])
+        return LifecycleRecord.objects.filter(bag=bag).order_by("recorded_at")
