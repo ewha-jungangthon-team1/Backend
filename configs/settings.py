@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'simulation',
     'dpp',
     'measurements',
+    'accounts',
 ]
 
 MIDDLEWARE = [
