@@ -1,0 +1,232 @@
+[
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "NORMAL_LIVE",
+      "name": "정상 (라이브)",
+      "scenario_type": "NORMAL",
+      "mode": "LIVE",
+      "logical_duration_seconds": 21600,
+      "sample_interval_seconds": 3600,
+      "config": {
+        "strap_load": {"min": 2.5, "max": 4.0},
+        "strap_strain": {"min": 0.005, "max": 0.012},
+        "humidity": {"min": 40, "max": 55},
+        "temperature": {"min": 20, "max": 25},
+        "load_bias": {"min": -0.1, "max": 0.1},
+        "body_deformation_ratio": {"min": 0.0, "max": 0.01},
+        "moisture_event": {"enabled": false}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "NORMAL_HISTORY",
+      "name": "정상 (과거기록)",
+      "scenario_type": "NORMAL",
+      "mode": "HISTORY",
+      "logical_duration_seconds": 604800,
+      "sample_interval_seconds": 86400,
+      "config": {
+        "strap_load": {"min": 2.5, "max": 4.0},
+        "strap_strain": {"min": 0.005, "max": 0.012},
+        "humidity": {"min": 40, "max": 55},
+        "temperature": {"min": 20, "max": 25},
+        "load_bias": {"min": -0.1, "max": 0.1},
+        "body_deformation_ratio": {"min": 0.0, "max": 0.01},
+        "moisture_event": {"enabled": false}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "OVERLOAD_LIVE",
+      "name": "과부하 (라이브)",
+      "scenario_type": "OVERLOAD",
+      "mode": "LIVE",
+      "logical_duration_seconds": 21600,
+      "sample_interval_seconds": 3600,
+      "config": {
+        "strap_load": {"start": 3.0, "end": 7.5},
+        "strap_strain": {"start": 0.01, "end": 0.05},
+        "humidity": {"min": 40, "max": 55},
+        "temperature": {"min": 22, "max": 26},
+        "load_bias": {"start": 0.1, "end": 0.7},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.07},
+        "moisture_event": {"enabled": false}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "OVERLOAD_HISTORY",
+      "name": "과부하 (과거기록)",
+      "scenario_type": "OVERLOAD",
+      "mode": "HISTORY",
+      "logical_duration_seconds": 604800,
+      "sample_interval_seconds": 86400,
+      "config": {
+        "strap_load": {"start": 3.0, "end": 7.5},
+        "strap_strain": {"start": 0.01, "end": 0.05},
+        "humidity": {"min": 40, "max": 55},
+        "temperature": {"min": 22, "max": 26},
+        "load_bias": {"start": 0.1, "end": 0.7},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.07},
+        "moisture_event": {"enabled": false}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "HIGH_TEMPERATURE_LIVE",
+      "name": "고온 (라이브)",
+      "scenario_type": "HIGH_TEMPERATURE",
+      "mode": "LIVE",
+      "logical_duration_seconds": 21600,
+      "sample_interval_seconds": 3600,
+      "config": {
+        "strap_load": {"min": 2.5, "max": 4.0},
+        "strap_strain": {"min": 0.005, "max": 0.012},
+        "humidity": {"min": 30, "max": 45},
+        "temperature": {"start": 25, "end": 38},
+        "load_bias": {"min": -0.1, "max": 0.1},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.02},
+        "moisture_event": {"enabled": false}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "HIGH_TEMPERATURE_HISTORY",
+      "name": "고온 (과거기록)",
+      "scenario_type": "HIGH_TEMPERATURE",
+      "mode": "HISTORY",
+      "logical_duration_seconds": 604800,
+      "sample_interval_seconds": 86400,
+      "config": {
+        "strap_load": {"min": 2.5, "max": 4.0},
+        "strap_strain": {"min": 0.005, "max": 0.012},
+        "humidity": {"min": 30, "max": 45},
+        "temperature": {"start": 25, "end": 38},
+        "load_bias": {"min": -0.1, "max": 0.1},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.02},
+        "moisture_event": {"enabled": false}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "HIGH_HUMIDITY_LIVE",
+      "name": "고습 (라이브)",
+      "scenario_type": "HIGH_HUMIDITY",
+      "mode": "LIVE",
+      "logical_duration_seconds": 21600,
+      "sample_interval_seconds": 3600,
+      "config": {
+        "strap_load": {"min": 2.5, "max": 4.0},
+        "strap_strain": {"min": 0.005, "max": 0.012},
+        "humidity": {"start": 45, "end": 85},
+        "temperature": {"min": 22, "max": 27},
+        "load_bias": {"min": -0.1, "max": 0.1},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.015},
+        "moisture_event": {"enabled": true, "trigger_at_ratio": 0.7}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "HIGH_HUMIDITY_HISTORY",
+      "name": "고습 (과거기록)",
+      "scenario_type": "HIGH_HUMIDITY",
+      "mode": "HISTORY",
+      "logical_duration_seconds": 604800,
+      "sample_interval_seconds": 86400,
+      "config": {
+        "strap_load": {"min": 2.5, "max": 4.0},
+        "strap_strain": {"min": 0.005, "max": 0.012},
+        "humidity": {"start": 45, "end": 85},
+        "temperature": {"min": 22, "max": 27},
+        "load_bias": {"min": -0.1, "max": 0.1},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.015},
+        "moisture_event": {"enabled": true, "trigger_at_ratio": 0.7}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "COMPOSITE_RISK_LIVE",
+      "name": "복합 위험 (라이브)",
+      "scenario_type": "COMPOSITE_RISK",
+      "mode": "LIVE",
+      "logical_duration_seconds": 21600,
+      "sample_interval_seconds": 3600,
+      "config": {
+        "strap_load": {"start": 4.0, "end": 8.0},
+        "strap_strain": {"start": 0.015, "end": 0.06},
+        "humidity": {"start": 50, "end": 80},
+        "temperature": {"start": 30, "end": 38},
+        "load_bias": {"start": 0.2, "end": 0.6},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.08},
+        "moisture_event": {"enabled": true, "trigger_at_ratio": 0.5}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  },
+  {
+    "model": "simulation.simulationscenario",
+    "fields": {
+      "code": "COMPOSITE_RISK_HISTORY",
+      "name": "복합 위험 (과거기록)",
+      "scenario_type": "COMPOSITE_RISK",
+      "mode": "HISTORY",
+      "logical_duration_seconds": 604800,
+      "sample_interval_seconds": 86400,
+      "config": {
+        "strap_load": {"start": 4.0, "end": 8.0},
+        "strap_strain": {"start": 0.015, "end": 0.06},
+        "humidity": {"start": 50, "end": 80},
+        "temperature": {"start": 30, "end": 38},
+        "load_bias": {"start": 0.2, "end": 0.6},
+        "body_deformation_ratio": {"start": 0.0, "end": 0.08},
+        "moisture_event": {"enabled": true, "trigger_at_ratio": 0.5}
+      },
+      "version": 1,
+      "is_active": true,
+      "created_at": "2026-08-06T16:17:00+09:00"
+    }
+  }
+]

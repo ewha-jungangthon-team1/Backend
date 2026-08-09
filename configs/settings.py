@@ -37,6 +37,11 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
+    'products',
+    'simulation',
+    'measurements',
+    'accounts',
 ]
 
 MIDDLEWARE = [
@@ -117,6 +122,9 @@ USE_I18N = True
 # 한국 날짜&숫자 형식
 USE_L10N = True
 
+# DB에는 UTC로 저장하고, TIME_ZONE 기준으로 표시/변환 (TIMESTAMPTZ 의도와 일치)
+USE_TZ = True
+
 
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
@@ -127,3 +135,7 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# media
+MEDIA_URL = '/media/' # 브라우저에서 접근할 주소
+MEDIA_ROOT = BASE_DIR / 'media' # 실제 컴퓨터에 저장되는 폴더 위치

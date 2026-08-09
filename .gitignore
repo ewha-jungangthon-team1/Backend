@@ -1,0 +1,8 @@
+# 클로드 (연우)
+CLAUDE.md
+
+# 가상환경
+venv/
+
+# DB
+db.sqlite3

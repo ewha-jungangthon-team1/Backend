@@ -1,0 +1,28 @@
+[
+  {
+    "model": "products.productmodel",
+    "pk": 1,
+    "fields": {
+      "brand": "Central Bag Co.",
+      "model_name": "Voyager Tote",
+      "material": "Full-grain Leather",
+      "care_guideline": {
+        "avoid_moisture": true,
+        "max_load_kg": 8,
+        "recommended_temp_range_c": [0, 35],
+        "note": "브랜드 공식 자료가 아닌 시연용 가정 데이터"
+      }
+    }
+  },
+  {
+    "model": "products.bag",
+    "pk": 1,
+    "fields": {
+      "product_model": 1,
+      "owner": 1,
+      "nfc_uid": "NFC-DEMO-0001",
+      "public_token": "11111111-1111-1111-1111-111111111111",
+      "created_at": "2026-08-01T00:00:00Z"
+    }
+  }
+]
