@@ -3,6 +3,18 @@ CLAUDE.md
 
 # 가상환경
 venv/
+.venv/
 
 # DB
 db.sqlite3
+
+# Environment Variables
+.env
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Static files
+staticfiles/
