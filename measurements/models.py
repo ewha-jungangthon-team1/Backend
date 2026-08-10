@@ -3,7 +3,6 @@ from products.models import Bag
 from simulation.models import SimulationScenario
 from django.core.validators import MinValueValidator, MaxValueValidator
 
-
 class MeasurementSession(models.Model):
     class Purpose(models.TextChoices):
         LIVE = "live", "Live"
@@ -35,7 +34,6 @@ class MeasurementSession(models.Model):
 class SensorReading(models.Model):
     session = models.ForeignKey(MeasurementSession, on_delete=models.CASCADE, related_name="readings")
     strap_load = models.DecimalField(max_digits=6, decimal_places=2)
-    strap_strain = models.DecimalField(max_digits=6, decimal_places=4)
     humidity = models.DecimalField(max_digits=5, decimal_places=2)
     moisture_detected = models.BooleanField(default=False)
     temperature = models.DecimalField(max_digits=5, decimal_places=2)

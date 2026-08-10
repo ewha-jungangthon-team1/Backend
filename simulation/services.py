@@ -30,7 +30,6 @@ SCENARIO_ROTATION_ORDER = [
 # → 필드 하나 추가/삭제하고 싶으면 여기 + FIELD_PRECISION만 고치면 됨
 FIELD_NAMES = [
     "strap_load",
-    "strap_strain",
     "humidity",
     "temperature",
     "load_bias",
@@ -40,7 +39,6 @@ FIELD_NAMES = [
 # 필드별 반올림 자릿수
 FIELD_PRECISION = {
     "strap_load": 2,
-    "strap_strain": 4,
     "humidity": 2,
     "temperature": 2,
     "load_bias": 4,
@@ -305,6 +303,10 @@ def get_latest_reading(session):
         latest = ensure_readings_up_to_now(session)
         progress_ratio = calculate_overall_progress_ratio(session)
 
+        # 시연 시간 종료 시 Session 자동 종료
+        if progress_ratio >= 1.0 and session.status == MeasurementSession.Status.RUNNING:
+            close_session(session)
+
     if latest is None:
         return None
 
@@ -333,3 +335,6 @@ def get_latest_reading(session):
         "moisture_detected": moisture_detected,
         **display,
     }
+
+def get_latest_session_for_bag(bag):
+    return bag.sessions.order_by("-started_at").first()
