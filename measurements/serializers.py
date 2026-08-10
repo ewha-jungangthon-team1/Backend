@@ -2,11 +2,7 @@ from rest_framework import serializers
 from products.serializers import HomeSerializer
 from simulation.services import POLLING_INTERVAL_SECONDS, calculate_scheduled_end_at, get_latest_reading
 from .models import MeasurementSession, SensorReading
-from .home import (
-    build_smart_material_points,
-    get_ai_summary_placeholder,
-    get_priority_care_placeholder,
-)
+from .home import build_smart_material_points
 
 class MeasurementSessionSerializer(serializers.ModelSerializer):
     class Meta:
@@ -115,10 +111,8 @@ class MeasurementSessionHomeSerializer(serializers.ModelSerializer):
         if latest_reading is None:
             return []
         return build_smart_material_points(obj, latest_reading)
- 
-    def get_ai_summary(self, obj):
-        return get_ai_summary_placeholder(obj)
- 
-    def get_priority_care(self, obj):
-        return get_priority_care_placeholder(obj)
+
+    # 종합 상태 제공 (figma 기준)
+
+    # 우선 케어 안내 (figma 기준)
  
