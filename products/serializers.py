@@ -1,12 +1,16 @@
 from rest_framework import serializers
 from .models import *
 
+class HomeSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ProductModel
+        fields = ["model_image", "model_name"]
+
 
 class ProductModelSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductModel
         fields = ["model_image", "model_name", "material", "care_guideline"]
-
 
 class BagDetailSerializer(serializers.ModelSerializer):
     product_model = ProductModelSerializer(read_only=True)
