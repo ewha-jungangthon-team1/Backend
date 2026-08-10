@@ -89,7 +89,7 @@ class MeasurementSessionHomeSerializer(serializers.ModelSerializer):
     홈 화면 응답을 조립하는 최상위 serializer.
     본체(MeasurementSession)가 이 앱(measurements)에 있으므로 조립도 여기서 담당한다.
       - product           -> products 앱의 HomeSerializer
-      - smart_material_points -> simulation.home의 계산 함수 (생성기가 만든 데이터를 가공)
+      - smart_material_points -> .home의 계산 함수 (생성기가 만든 데이터를 가공)
       - ai_summary / priority_care -> (지금은 placeholder, 나중에 B의 앱으로 교체)
     """
  

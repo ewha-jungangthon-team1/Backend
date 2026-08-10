@@ -6,7 +6,7 @@
       "name": "정상 (라이브)",
       "scenario_type": "NORMAL",
       "mode": "LIVE",
-      "logical_duration_seconds": 21600,
+      "logical_duration_seconds": 86400,
       "sample_interval_seconds": 3600,
       "config": {
         "strap_load": {"min": 2.5, "max": 4.0},
@@ -52,7 +52,7 @@
       "name": "과부하 (라이브)",
       "scenario_type": "OVERLOAD",
       "mode": "LIVE",
-      "logical_duration_seconds": 21600,
+      "logical_duration_seconds": 86400,
       "sample_interval_seconds": 3600,
       "config": {
         "strap_load": {"start": 3.0, "end": 7.5},
@@ -98,7 +98,7 @@
       "name": "고온 (라이브)",
       "scenario_type": "HIGH_TEMPERATURE",
       "mode": "LIVE",
-      "logical_duration_seconds": 21600,
+      "logical_duration_seconds": 86400,
       "sample_interval_seconds": 3600,
       "config": {
         "strap_load": {"min": 2.5, "max": 4.0},
@@ -144,7 +144,7 @@
       "name": "고습 (라이브)",
       "scenario_type": "HIGH_HUMIDITY",
       "mode": "LIVE",
-      "logical_duration_seconds": 21600,
+      "logical_duration_seconds": 86400,
       "sample_interval_seconds": 3600,
       "config": {
         "strap_load": {"min": 2.5, "max": 4.0},
@@ -190,7 +190,7 @@
       "name": "복합 위험 (라이브)",
       "scenario_type": "COMPOSITE_RISK",
       "mode": "LIVE",
-      "logical_duration_seconds": 21600,
+      "logical_duration_seconds": 86400,
       "sample_interval_seconds": 3600,
       "config": {
         "strap_load": {"start": 4.0, "end": 8.0},
