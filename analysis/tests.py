@@ -2,6 +2,7 @@ import json
 from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
+from unittest.mock import Mock
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
@@ -15,7 +16,7 @@ from products.models import Bag, ProductModel
 from simulation.models import SimulationScenario
 
 from .constants import RuleCode, Severity
-from .metrics import calculate_history_metrics
+from .metrics import build_history_daily_series, calculate_history_metrics
 from .models import AnalysisReport
 from .rules import evaluate_history_rules
 from .serializers import AnalysisReportSerializer
@@ -209,6 +210,90 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
 
         with self.assertRaisesMessage(ValueError, "Only COMPLETED sessions"):
             calculate_history_metrics(session)
+
+
+class HistoryDailySeriesTests(HistoryAnalysisTestCase):
+    def test_builds_seven_daily_items_in_sequence_order(self):
+        session = self.create_session()
+        self.add_readings(session)
+
+        daily_series = build_history_daily_series(session)
+
+        self.assertEqual(len(daily_series), 7)
+        self.assertEqual(
+            [item["load_kg"] for item in daily_series],
+            [4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+        )
+        self.assertEqual(
+            [item["date"] for item in daily_series],
+            [
+                "2026-07-28",
+                "2026-07-29",
+                "2026-07-30",
+                "2026-07-31",
+                "2026-08-01",
+                "2026-08-02",
+                "2026-08-03",
+            ],
+        )
+        self.assertEqual(
+            [item["moisture_detected"] for item in daily_series],
+            [False, False, True, False, True, False, False],
+        )
+
+    def test_converts_utc_timestamp_to_project_timezone_date(self):
+        session = self.create_session()
+        SensorReading.objects.create(
+            session=session,
+            strap_load=Decimal("3.02"),
+            humidity=Decimal("50.00"),
+            moisture_detected=False,
+            temperature=Decimal("25.00"),
+            measured_at=datetime(2026, 8, 3, 15, 30, tzinfo=ZoneInfo("UTC")),
+            load_bias=Decimal("0.0000"),
+            body_deformation_ratio=Decimal("0.0250"),
+            sequence=0,
+        )
+
+        daily_series = build_history_daily_series(session)
+
+        self.assertEqual(daily_series[0]["date"], "2026-08-04")
+
+    def test_rounds_numeric_fields_and_preserves_boolean(self):
+        reading = Mock(
+            strap_load=Decimal("3.026"),
+            body_deformation_ratio=Decimal("0.02504"),
+            moisture_detected=True,
+            measured_at=datetime(2026, 8, 4, 9, tzinfo=ZoneInfo("Asia/Seoul")),
+        )
+        session = Mock()
+        session.readings.order_by.return_value = [reading]
+
+        daily_series = build_history_daily_series(session)
+
+        self.assertEqual(
+            daily_series[0],
+            {
+                "date": "2026-08-04",
+                "load_kg": 3.03,
+                "deformation_ratio": 0.025,
+                "deformation_percent": 2.5,
+                "moisture_detected": True,
+            },
+        )
+        self.assertIsInstance(daily_series[0]["load_kg"], float)
+        self.assertIsInstance(daily_series[0]["deformation_ratio"], float)
+        self.assertIsInstance(daily_series[0]["deformation_percent"], float)
+        self.assertIs(daily_series[0]["moisture_detected"], True)
+        session.readings.order_by.assert_called_once_with("sequence")
+
+    def test_result_is_json_renderable(self):
+        session = self.create_session()
+        self.add_readings(session)
+
+        rendered = JSONRenderer().render(build_history_daily_series(session))
+
+        self.assertEqual(len(json.loads(rendered)), 7)
 
 
 class HistoryRuleEngineTests(HistoryAnalysisTestCase):

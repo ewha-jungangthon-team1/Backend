@@ -1,4 +1,6 @@
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
+
+from django.utils import timezone
 
 from measurements.models import MeasurementSession
 
@@ -37,6 +39,36 @@ def _detected_days(values, threshold):
     if threshold is None:
         return None
     return sum(value > threshold for value in values)
+
+
+def _quantize_decimal(value, decimal_places):
+    quantum = Decimal("1").scaleb(-decimal_places)
+    return Decimal(str(value)).quantize(quantum, rounding=ROUND_HALF_UP)
+
+
+def build_history_daily_series(session):
+    daily_series = []
+
+    for reading in session.readings.order_by("sequence"):
+        deformation_ratio = _quantize_decimal(
+            reading.body_deformation_ratio,
+            4,
+        )
+        daily_series.append(
+            {
+                "date": timezone.localdate(
+                    reading.measured_at, timezone.get_default_timezone()
+                ).isoformat(),
+                "load_kg": float(_quantize_decimal(reading.strap_load, 2)),
+                "deformation_ratio": float(deformation_ratio),
+                "deformation_percent": float(
+                    _quantize_decimal(deformation_ratio * 100, 2)
+                ),
+                "moisture_detected": reading.moisture_detected,
+            }
+        )
+
+    return daily_series
 
 
 def calculate_history_metrics(session):
