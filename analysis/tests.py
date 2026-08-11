@@ -5,7 +5,9 @@ from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.urls import reverse
 from rest_framework.renderers import JSONRenderer
+from rest_framework.test import APIClient
 
 from measurements.models import MeasurementSession, SensorReading
 from products.models import Bag, ProductModel
@@ -81,6 +83,30 @@ class HistoryAnalysisTestCase(TestCase):
                 measured_at=self.started_at + timedelta(days=sequence),
                 load_bias=Decimal(load_biases[sequence]),
                 body_deformation_ratio=Decimal(deformations[sequence]),
+                sequence=sequence,
+            )
+
+    def add_uniform_readings(
+        self,
+        session,
+        *,
+        strap_load="4.00",
+        temperature="25.00",
+        humidity="50.00",
+        moisture_detected=False,
+        load_bias="0.1000",
+        body_deformation_ratio="0.0100",
+    ):
+        for sequence in range(7):
+            SensorReading.objects.create(
+                session=session,
+                strap_load=Decimal(strap_load),
+                humidity=Decimal(humidity),
+                moisture_detected=moisture_detected,
+                temperature=Decimal(temperature),
+                measured_at=self.started_at + timedelta(days=sequence),
+                load_bias=Decimal(load_bias),
+                body_deformation_ratio=Decimal(body_deformation_ratio),
                 sequence=sequence,
             )
 
@@ -254,30 +280,6 @@ class HistoryRuleEngineTests(HistoryAnalysisTestCase):
 
 
 class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
-    def add_uniform_readings(
-        self,
-        session,
-        *,
-        strap_load="4.00",
-        temperature="25.00",
-        humidity="50.00",
-        moisture_detected=False,
-        load_bias="0.1000",
-        body_deformation_ratio="0.0100",
-    ):
-        for sequence in range(7):
-            SensorReading.objects.create(
-                session=session,
-                strap_load=Decimal(strap_load),
-                humidity=Decimal(humidity),
-                moisture_detected=moisture_detected,
-                temperature=Decimal(temperature),
-                measured_at=self.started_at + timedelta(days=sequence),
-                load_bias=Decimal(load_bias),
-                body_deformation_ratio=Decimal(body_deformation_ratio),
-                sequence=sequence,
-            )
-
     def test_creates_normal_history_report(self):
         session = self.create_session()
         self.add_uniform_readings(session)
@@ -466,3 +468,119 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
 
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data, {})
+
+
+class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def get_url(self, session_id):
+        return reverse(
+            "analyze-history-session",
+            kwargs={"session_id": session_id},
+        )
+
+    def test_analyzes_normal_history_without_request_body(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+
+        response = self.client.post(self.get_url(session.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["created"])
+        self.assertEqual(response.data["session_id"], session.id)
+        self.assertEqual(response.data["severity"], Severity.NORMAL.value)
+        self.assertEqual(response.data["active_rules"], [])
+        self.assertEqual(
+            set(response.data),
+            {
+                "created",
+                "id",
+                "session_id",
+                "scenario_code",
+                "metrics",
+                "severity",
+                "active_rules",
+                "unavailable_rules",
+                "care_guideline_snapshot",
+                "created_at",
+                "updated_at",
+            },
+        )
+        self.assertTrue(
+            AnalysisReport.objects.filter(session=session).exists()
+        )
+
+    def test_analyzes_risk_history_and_ignores_request_values(self):
+        session = self.create_session()
+        self.add_uniform_readings(session, strap_load="6.00")
+
+        response = self.client.post(
+            self.get_url(session.id),
+            {
+                "severity": Severity.NORMAL.value,
+                "active_rules": [],
+                "metrics": {"tampered": True},
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["severity"], Severity.WARNING.value)
+        self.assertEqual(
+            response.data["active_rules"], [RuleCode.HIGH_LOAD.value]
+        )
+        self.assertNotEqual(response.data["metrics"], {"tampered": True})
+
+    def test_reanalysis_returns_same_report(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+        url = self.get_url(session.id)
+
+        first_response = self.client.post(url, {}, format="json")
+        second_response = self.client.post(url, {}, format="json")
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertTrue(first_response.data["created"])
+        self.assertFalse(second_response.data["created"])
+        self.assertEqual(first_response.data["id"], second_response.data["id"])
+        self.assertEqual(
+            AnalysisReport.objects.filter(session=session).count(), 1
+        )
+
+    def test_returns_404_for_missing_session(self):
+        response = self.client.post(self.get_url(999999))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("detail", response.data)
+        self.assertFalse(AnalysisReport.objects.exists())
+
+    def test_returns_400_for_live_session(self):
+        session = self.create_session(purpose=MeasurementSession.Purpose.LIVE)
+        self.add_uniform_readings(session)
+
+        response = self.client.post(self.get_url(session.id))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("detail", response.data)
+        self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+    def test_returns_400_for_running_history(self):
+        session = self.create_session(status=MeasurementSession.Status.RUNNING)
+        self.add_uniform_readings(session)
+
+        response = self.client.post(self.get_url(session.id))
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("detail", response.data)
+        self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+    def test_returns_400_for_history_without_readings(self):
+        session = self.create_session()
+
+        response = self.client.post(self.get_url(session.id), {}, format="json")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("detail", response.data)
+        self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
