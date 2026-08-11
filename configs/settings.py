@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'simulation',
     'measurements',
     'accounts',
+    'analysis',
 ]
 
 MIDDLEWARE = [
