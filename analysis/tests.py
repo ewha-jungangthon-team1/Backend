@@ -184,6 +184,77 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
         self.assertEqual(metrics["load_bias"]["biased_days"], 4)
         self.assertEqual(metrics["deformation"]["deformation_detected_days"], 3)
 
+    def test_explicit_guideline_overrides_live_thresholds_without_mutation(self):
+        session = self.create_session()
+        self.add_readings(session)
+        self.product_model.care_guideline = {
+            "max_load_kg": 10.0,
+            "recommended_temp_range_c": [0, 100],
+            "max_humidity_percent": 100,
+            "max_abs_load_bias": 1.0,
+            "max_body_deformation_ratio": 1.0,
+        }
+        self.product_model.save(update_fields=["care_guideline"])
+        explicit_guideline = {
+            "max_load_kg": 5.5,
+            "recommended_temp_range_c": [0, 35],
+            "max_humidity_percent": 70,
+            "max_abs_load_bias": 0.30,
+            "max_body_deformation_ratio": 0.03,
+        }
+        original_explicit_guideline = deepcopy(explicit_guideline)
+
+        live_metrics = calculate_history_metrics(session)
+        explicit_metrics = calculate_history_metrics(
+            session,
+            care_guideline=explicit_guideline,
+        )
+
+        self.assertEqual(live_metrics["load"]["overload_detected_days"], 0)
+        self.assertEqual(explicit_metrics["load"]["overload_detected_days"], 5)
+        self.assertEqual(
+            explicit_metrics["temperature"]["high_temperature_detected_days"],
+            2,
+        )
+        self.assertEqual(
+            explicit_metrics["humidity"]["high_humidity_detected_days"],
+            3,
+        )
+        self.assertEqual(explicit_metrics["load_bias"]["biased_days"], 4)
+        self.assertEqual(
+            explicit_metrics["deformation"]["deformation_detected_days"],
+            3,
+        )
+        self.assertEqual(
+            explicit_metrics["load"]["average_kg"],
+            live_metrics["load"]["average_kg"],
+        )
+        self.assertEqual(
+            explicit_metrics["load"]["max_kg"],
+            live_metrics["load"]["max_kg"],
+        )
+        self.assertEqual(
+            explicit_metrics["daily_series"],
+            live_metrics["daily_series"],
+        )
+        self.assertEqual(explicit_guideline, original_explicit_guideline)
+
+    def test_explicit_empty_guideline_does_not_fall_back_to_live_guideline(self):
+        session = self.create_session()
+        self.add_readings(session)
+
+        metrics = calculate_history_metrics(session, care_guideline={})
+
+        self.assertIsNone(metrics["load"]["overload_detected_days"])
+        self.assertIsNone(
+            metrics["temperature"]["high_temperature_detected_days"]
+        )
+        self.assertIsNone(metrics["humidity"]["high_humidity_detected_days"])
+        self.assertIsNone(metrics["load_bias"]["biased_days"])
+        self.assertIsNone(
+            metrics["deformation"]["deformation_detected_days"]
+        )
+
     def test_result_is_json_serializable(self):
         session = self.create_session()
         self.add_readings(session)
@@ -1193,6 +1264,40 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
             analyze_history_session(session)
 
         self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+
+class AnalysisReportComparisonFieldTests(HistoryAnalysisTestCase):
+    def test_defaults_comparison_to_empty_dict(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+
+        report, _created = analyze_history_session(session)
+
+        self.assertEqual(report.comparison, {})
+
+    def test_persists_comparison_json_round_trip(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+        report, _created = analyze_history_session(session)
+        comparison = {
+            "available": True,
+            "metrics": {
+                "load": {
+                    "average_kg": {
+                        "current": 5.2,
+                        "previous": 3.4,
+                        "change": 1.8,
+                        "change_percent": 52.9,
+                    }
+                }
+            },
+        }
+
+        report.comparison = comparison
+        report.save(update_fields=["comparison"])
+        report.refresh_from_db()
+
+        self.assertEqual(report.comparison, comparison)
 
 
 class AnalysisReportSerializerTests(HistoryAnalysisTestCase):

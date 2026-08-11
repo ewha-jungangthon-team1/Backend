@@ -71,7 +71,7 @@ def build_history_daily_series(session):
     return daily_series
 
 
-def calculate_history_metrics(session):
+def calculate_history_metrics(session, care_guideline=None):
     if session is None:
         raise ValueError("session is required.")
     if session.purpose != MeasurementSession.Purpose.HISTORY:
@@ -83,7 +83,8 @@ def calculate_history_metrics(session):
     if not readings:
         raise ValueError("At least one SensorReading is required.")
 
-    care_guideline = session.bag.product_model.care_guideline
+    if care_guideline is None:
+        care_guideline = session.bag.product_model.care_guideline
     thresholds = _get_thresholds(care_guideline)
 
     loads = [float(reading.strap_load) for reading in readings]
