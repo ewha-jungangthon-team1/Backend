@@ -525,7 +525,9 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "id",
                 "session_id",
                 "scenario_code",
+                "period",
                 "metrics",
+                "chart_references",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -537,7 +539,24 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
         self.assertEqual(data["id"], report.id)
         self.assertEqual(data["session_id"], report.session_id)
         self.assertEqual(data["scenario_code"], scenario.code)
+        self.assertEqual(
+            data["period"],
+            {
+                "started_at": "2026-07-28T09:00:00+09:00",
+                "ended_at": "2026-08-04T09:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
+        )
         self.assertEqual(data["metrics"], report.metrics)
+        self.assertEqual(
+            data["chart_references"],
+            {
+                "max_load_kg": 5.5,
+                "max_body_deformation_ratio": 0.03,
+                "max_body_deformation_percent": 3.0,
+                "avoid_moisture": True,
+            },
+        )
         self.assertEqual(data["severity"], report.severity)
         self.assertEqual(data["active_rules"], report.active_rules)
         self.assertEqual(data["unavailable_rules"], report.unavailable_rules)
@@ -556,13 +575,44 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
 
         self.assertIsNone(data["scenario_code"])
 
+    def test_serializes_null_ended_at(self):
+        session = self.create_session()
+        session.ended_at = None
+        session.save(update_fields=["ended_at"])
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+
+        data = AnalysisReportSerializer(report).data
+
+        self.assertIsNone(data["period"]["ended_at"])
+
+    def test_serializes_missing_chart_references_as_null(self):
+        session = self.create_session()
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+        report.care_guideline_snapshot = {}
+
+        data = AnalysisReportSerializer(report).data
+
+        self.assertEqual(
+            data["chart_references"],
+            {
+                "max_load_kg": None,
+                "max_body_deformation_ratio": None,
+                "max_body_deformation_percent": None,
+                "avoid_moisture": None,
+            },
+        )
+
     def test_all_fields_are_read_only(self):
         serializer = AnalysisReportSerializer(
             data={
                 "id": 999,
                 "session_id": 999,
                 "scenario_code": "OVERLOAD_HISTORY",
+                "period": {"timezone": "UTC"},
                 "metrics": {"tampered": True},
+                "chart_references": {"max_load_kg": 999},
                 "severity": Severity.DANGER.value,
                 "active_rules": [RuleCode.HIGH_LOAD.value],
                 "unavailable_rules": [],
@@ -597,6 +647,23 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         self.assertEqual(response.data["session_id"], session.id)
         self.assertEqual(response.data["severity"], Severity.NORMAL.value)
         self.assertEqual(response.data["active_rules"], [])
+        self.assertEqual(
+            response.data["period"],
+            {
+                "started_at": "2026-07-28T09:00:00+09:00",
+                "ended_at": "2026-08-04T09:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(
+            response.data["chart_references"],
+            {
+                "max_load_kg": 5.5,
+                "max_body_deformation_ratio": 0.03,
+                "max_body_deformation_percent": 3.0,
+                "avoid_moisture": True,
+            },
+        )
         self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
         self.assertEqual(
             response.data["metrics"]["daily_series"][0],
@@ -615,7 +682,9 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "id",
                 "session_id",
                 "scenario_code",
+                "period",
                 "metrics",
+                "chart_references",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -663,6 +732,10 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         first_reading = session.readings.order_by("sequence").first()
         first_reading.strap_load = Decimal("6.00")
         first_reading.save(update_fields=["strap_load"])
+        updated_guideline = self.product_model.care_guideline.copy()
+        updated_guideline["max_load_kg"] = 8.0
+        self.product_model.care_guideline = updated_guideline
+        self.product_model.save(update_fields=["care_guideline"])
         second_response = self.client.post(url, {}, format="json")
 
         self.assertEqual(first_response.status_code, 200)
@@ -682,6 +755,12 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             6.0,
         )
         self.assertEqual(second_response.data["metrics"]["load"]["max_kg"], 6.0)
+        self.assertEqual(first_response.data["chart_references"]["max_load_kg"], 5.5)
+        self.assertEqual(second_response.data["chart_references"]["max_load_kg"], 8.0)
+        self.assertEqual(
+            second_response.data["care_guideline_snapshot"]["max_load_kg"],
+            8.0,
+        )
 
     def test_returns_404_for_missing_session(self):
         response = self.client.post(self.get_url(999999))
@@ -751,7 +830,9 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
                 "id",
                 "session_id",
                 "scenario_code",
+                "period",
                 "metrics",
+                "chart_references",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -765,6 +846,14 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(response.data["session_id"], session.id)
         self.assertEqual(
             response.data["scenario_code"], session.scenario.code
+        )
+        self.assertEqual(
+            response.data["period"],
+            {
+                "started_at": "2026-07-28T09:00:00+09:00",
+                "ended_at": "2026-08-04T09:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
         )
         self.assertEqual(response.data["metrics"], report.metrics)
         self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
@@ -780,6 +869,41 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(
             response.data["care_guideline_snapshot"],
             report.care_guideline_snapshot,
+        )
+        self.assertEqual(
+            response.data["chart_references"],
+            {
+                "max_load_kg": 5.5,
+                "max_body_deformation_ratio": 0.03,
+                "max_body_deformation_percent": 3.0,
+                "avoid_moisture": True,
+            },
+        )
+
+    def test_get_matches_post_period_references_and_daily_series(self):
+        session = self.create_session()
+        session.scenario = self.create_scenario()
+        session.save(update_fields=["scenario"])
+        self.add_readings(session)
+        post_response = self.client.post(
+            reverse(
+                "analyze-history-session",
+                kwargs={"session_id": session.id},
+            )
+        )
+
+        get_response = self.client.get(self.get_url(post_response.data["id"]))
+
+        self.assertEqual(post_response.status_code, 200)
+        self.assertEqual(get_response.status_code, 200)
+        self.assertEqual(get_response.data["period"], post_response.data["period"])
+        self.assertEqual(
+            get_response.data["chart_references"],
+            post_response.data["chart_references"],
+        )
+        self.assertEqual(
+            get_response.data["metrics"]["daily_series"],
+            post_response.data["metrics"]["daily_series"],
         )
 
     def test_returns_404_for_missing_report(self):
@@ -821,6 +945,10 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             4.0,
         )
         self.assertEqual(report.care_guideline_snapshot, original_snapshot)
+        self.assertEqual(
+            response.data["chart_references"]["max_load_kg"],
+            original_snapshot["max_load_kg"],
+        )
         self.assertEqual(response.data["metrics"], original_metrics)
         self.assertEqual(
             response.data["care_guideline_snapshot"], original_snapshot
