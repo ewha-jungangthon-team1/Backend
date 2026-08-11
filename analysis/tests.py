@@ -111,7 +111,7 @@ class HistoryAnalysisTestCase(TestCase):
                 humidity=Decimal(humidity),
                 moisture_detected=moisture_detected,
                 temperature=Decimal(temperature),
-                measured_at=self.started_at + timedelta(days=sequence),
+                measured_at=session.started_at + timedelta(days=sequence),
                 load_bias=Decimal(load_bias),
                 body_deformation_ratio=Decimal(body_deformation_ratio),
                 sequence=sequence,
@@ -1569,6 +1569,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "period",
                 "metrics",
                 "chart_references",
+                "comparison",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -1589,6 +1590,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
             },
         )
         self.assertEqual(data["metrics"], report.metrics)
+        self.assertEqual(data["comparison"], report.comparison)
         self.assertEqual(
             data["chart_references"],
             {
@@ -1658,6 +1660,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "period": {"timezone": "UTC"},
                 "metrics": {"tampered": True},
                 "chart_references": {"max_load_kg": 999},
+                "comparison": {"tampered": True},
                 "severity": Severity.DANGER.value,
                 "active_rules": [RuleCode.HIGH_LOAD.value],
                 "unavailable_rules": [],
@@ -1669,6 +1672,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
 
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data, {})
+        self.assertTrue(serializer.fields["comparison"].read_only)
 
 
 class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
@@ -1730,6 +1734,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "period",
                 "metrics",
                 "chart_references",
+                "comparison",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -1742,11 +1747,17 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             AnalysisReport.objects.filter(session=session).exists()
         )
         report = AnalysisReport.objects.get(session=session)
-        self.assertNotIn("comparison", response.data)
         self.assertEqual(
-            report.comparison["reason"],
-            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+            response.data["comparison"],
+            {
+                "available": False,
+                "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+                "previous_session_id": None,
+                "previous_period": None,
+                "metrics": None,
+            },
         )
+        self.assertEqual(response.data["comparison"], report.comparison)
         self.assertEqual(
             response.data["metrics"]["daily_series"],
             report.metrics["daily_series"],
@@ -1772,6 +1783,81 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             response.data["active_rules"], [RuleCode.HIGH_LOAD.value]
         )
         self.assertNotEqual(response.data["metrics"], {"tampered": True})
+
+    def test_returns_available_comparison_for_exact_previous_period(self):
+        previous = self.create_session()
+        self.add_uniform_readings(previous)
+        current = self.create_session()
+        current.started_at += timedelta(days=7)
+        current.ended_at += timedelta(days=7)
+        current.save(update_fields=["started_at", "ended_at"])
+        self.add_uniform_readings(current)
+
+        response = self.client.post(self.get_url(current.pk))
+
+        self.assertEqual(response.status_code, 200)
+        comparison = response.data["comparison"]
+        self.assertTrue(comparison["available"])
+        self.assertIsNone(comparison["reason"])
+        self.assertEqual(comparison["previous_session_id"], previous.pk)
+        self.assertEqual(
+            comparison["previous_period"],
+            {
+                "started_at": "2026-07-28T09:00:00+09:00",
+                "ended_at": "2026-08-04T09:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(
+            set(comparison["metrics"]),
+            {
+                "load",
+                "temperature",
+                "humidity",
+                "moisture",
+                "load_bias",
+                "deformation",
+            },
+        )
+        self.assertEqual(
+            sum(
+                len(domain_metrics)
+                for domain_metrics in comparison["metrics"].values()
+            ),
+            15,
+        )
+
+    def test_reanalysis_returns_latest_comparison_snapshot(self):
+        previous = self.create_session()
+        self.add_uniform_readings(previous)
+        current = self.create_session()
+        current.started_at += timedelta(days=7)
+        current.ended_at += timedelta(days=7)
+        current.save(update_fields=["started_at", "ended_at"])
+        self.add_uniform_readings(current)
+        url = self.get_url(current.pk)
+
+        first_response = self.client.post(url)
+        previous.ended_at -= timedelta(hours=1)
+        previous.save(update_fields=["ended_at"])
+        second_response = self.client.post(url)
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
+        self.assertTrue(first_response.data["created"])
+        self.assertFalse(second_response.data["created"])
+        self.assertEqual(first_response.data["id"], second_response.data["id"])
+        self.assertTrue(first_response.data["comparison"]["available"])
+        self.assertEqual(
+            second_response.data["comparison"],
+            {
+                "available": False,
+                "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+                "previous_session_id": None,
+                "previous_period": None,
+                "metrics": None,
+            },
+        )
 
     def test_reanalysis_returns_same_report(self):
         session = self.create_session()
@@ -1883,6 +1969,7 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
                 "period",
                 "metrics",
                 "chart_references",
+                "comparison",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -1906,6 +1993,7 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             },
         )
         self.assertEqual(response.data["metrics"], report.metrics)
+        self.assertEqual(response.data["comparison"], report.comparison)
         self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
         self.assertEqual(
             response.data["metrics"]["daily_series"],
@@ -1955,6 +2043,10 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             get_response.data["metrics"]["daily_series"],
             post_response.data["metrics"]["daily_series"],
         )
+        self.assertEqual(
+            get_response.data["comparison"],
+            post_response.data["comparison"],
+        )
 
     def test_returns_404_for_missing_report(self):
         response = self.client.get(self.get_url(999999))
@@ -1963,11 +2055,21 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertIn("detail", response.data)
 
     def test_get_does_not_reanalyze_or_update_report(self):
-        session, report = self.create_report()
+        previous = self.create_session()
+        self.add_uniform_readings(previous)
+        session = self.create_session()
+        session.started_at += timedelta(days=7)
+        session.ended_at += timedelta(days=7)
+        session.save(update_fields=["started_at", "ended_at"])
+        self.add_uniform_readings(session)
+        report, _created = analyze_history_session(session)
         original_metrics = deepcopy(report.metrics)
+        original_comparison = deepcopy(report.comparison)
         original_snapshot = deepcopy(report.care_guideline_snapshot)
         original_updated_at = report.updated_at
         original_count = AnalysisReport.objects.count()
+
+        self.assertTrue(original_comparison["available"])
 
         first_reading = session.readings.order_by("sequence").first()
         first_reading.strap_load = Decimal("99.00")
@@ -1982,6 +2084,8 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(AnalysisReport.objects.count(), original_count)
         self.assertEqual(report.updated_at, original_updated_at)
         self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(report.comparison, original_comparison)
+        self.assertEqual(response.data["comparison"], original_comparison)
         self.assertEqual(
             report.metrics["daily_series"],
             original_metrics["daily_series"],
@@ -2003,6 +2107,20 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(
             response.data["care_guideline_snapshot"], original_snapshot
         )
+
+    def test_retrieves_legacy_empty_comparison_without_normalization(self):
+        session = self.create_session()
+        report = AnalysisReport.objects.create(
+            session=session,
+            metrics={},
+            severity=Severity.NORMAL.value,
+            care_guideline_snapshot={},
+        )
+
+        response = self.client.get(self.get_url(report.pk))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["comparison"], {})
 
     def test_retrieves_report_with_null_scenario(self):
         _session, report = self.create_report(with_scenario=False)
