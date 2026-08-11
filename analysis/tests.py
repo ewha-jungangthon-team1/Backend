@@ -5,14 +5,17 @@ from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from rest_framework.renderers import JSONRenderer
 
 from measurements.models import MeasurementSession, SensorReading
 from products.models import Bag, ProductModel
+from simulation.models import SimulationScenario
 
 from .constants import RuleCode, Severity
 from .metrics import calculate_history_metrics
 from .models import AnalysisReport
 from .rules import evaluate_history_rules
+from .serializers import AnalysisReportSerializer
 from .services import analyze_history_session
 
 
@@ -384,3 +387,82 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
             analyze_history_session(session)
 
         self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+
+class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
+    def create_scenario(self, code="NORMAL_HISTORY"):
+        return SimulationScenario.objects.create(
+            code=code,
+            name="Normal History",
+            scenario_type=SimulationScenario.ScenarioType.NORMAL,
+            mode=SimulationScenario.Mode.HISTORY,
+            logical_duration_seconds=604800,
+            sample_interval_seconds=86400,
+            config={},
+        )
+
+    def test_serializes_analysis_report_fields_and_values(self):
+        scenario = self.create_scenario()
+        session = self.create_session()
+        session.scenario = scenario
+        session.save(update_fields=["scenario"])
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+
+        data = AnalysisReportSerializer(report).data
+
+        self.assertEqual(
+            set(data),
+            {
+                "id",
+                "session_id",
+                "scenario_code",
+                "metrics",
+                "severity",
+                "active_rules",
+                "unavailable_rules",
+                "care_guideline_snapshot",
+                "created_at",
+                "updated_at",
+            },
+        )
+        self.assertEqual(data["id"], report.id)
+        self.assertEqual(data["session_id"], report.session_id)
+        self.assertEqual(data["scenario_code"], scenario.code)
+        self.assertEqual(data["metrics"], report.metrics)
+        self.assertEqual(data["severity"], report.severity)
+        self.assertEqual(data["active_rules"], report.active_rules)
+        self.assertEqual(data["unavailable_rules"], report.unavailable_rules)
+        self.assertEqual(
+            data["care_guideline_snapshot"],
+            report.care_guideline_snapshot,
+        )
+        JSONRenderer().render(data)
+
+    def test_serializes_null_scenario_code(self):
+        session = self.create_session()
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+
+        data = AnalysisReportSerializer(report).data
+
+        self.assertIsNone(data["scenario_code"])
+
+    def test_all_fields_are_read_only(self):
+        serializer = AnalysisReportSerializer(
+            data={
+                "id": 999,
+                "session_id": 999,
+                "scenario_code": "OVERLOAD_HISTORY",
+                "metrics": {"tampered": True},
+                "severity": Severity.DANGER.value,
+                "active_rules": [RuleCode.HIGH_LOAD.value],
+                "unavailable_rules": [],
+                "care_guideline_snapshot": {"max_load_kg": 999},
+                "created_at": "2026-08-12T00:00:00Z",
+                "updated_at": "2026-08-12T00:00:00Z",
+            }
+        )
+
+        self.assertTrue(serializer.is_valid())
+        self.assertEqual(serializer.validated_data, {})
