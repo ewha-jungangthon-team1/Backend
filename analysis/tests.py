@@ -11,7 +11,9 @@ from products.models import Bag, ProductModel
 
 from .constants import RuleCode, Severity
 from .metrics import calculate_history_metrics
+from .models import AnalysisReport
 from .rules import evaluate_history_rules
+from .services import analyze_history_session
 
 
 class HistoryAnalysisTestCase(TestCase):
@@ -246,3 +248,139 @@ class HistoryRuleEngineTests(HistoryAnalysisTestCase):
         self.assertNotIn(RuleCode.HIGH_HUMIDITY.value, result["active_rules"])
         self.assertNotIn(RuleCode.LOAD_BIAS.value, result["active_rules"])
         self.assertNotIn(RuleCode.DEFORMATION.value, result["active_rules"])
+
+
+class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
+    def add_uniform_readings(
+        self,
+        session,
+        *,
+        strap_load="4.00",
+        temperature="25.00",
+        humidity="50.00",
+        moisture_detected=False,
+        load_bias="0.1000",
+        body_deformation_ratio="0.0100",
+    ):
+        for sequence in range(7):
+            SensorReading.objects.create(
+                session=session,
+                strap_load=Decimal(strap_load),
+                humidity=Decimal(humidity),
+                moisture_detected=moisture_detected,
+                temperature=Decimal(temperature),
+                measured_at=self.started_at + timedelta(days=sequence),
+                load_bias=Decimal(load_bias),
+                body_deformation_ratio=Decimal(body_deformation_ratio),
+                sequence=sequence,
+            )
+
+    def test_creates_normal_history_report(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+
+        report, created = analyze_history_session(session)
+
+        self.assertTrue(created)
+        self.assertEqual(report.session, session)
+        self.assertEqual(report.severity, Severity.NORMAL.value)
+        self.assertEqual(report.active_rules, [])
+
+    def test_creates_single_risk_history_report(self):
+        session = self.create_session()
+        self.add_uniform_readings(session, strap_load="6.00")
+
+        report, created = analyze_history_session(session)
+
+        self.assertTrue(created)
+        self.assertEqual(report.severity, Severity.WARNING.value)
+        self.assertEqual(report.active_rules, [RuleCode.HIGH_LOAD.value])
+
+    def test_creates_composite_risk_history_report(self):
+        session = self.create_session()
+        self.add_readings(session)
+
+        report, created = analyze_history_session(session)
+
+        self.assertTrue(created)
+        self.assertEqual(report.severity, Severity.WARNING.value)
+        self.assertEqual(
+            set(report.active_rules),
+            {rule_code.value for rule_code in RuleCode},
+        )
+
+    def test_reanalysis_updates_existing_report(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+
+        first_report, first_created = analyze_history_session(session)
+
+        first_reading = session.readings.order_by("sequence").first()
+        first_reading.strap_load = Decimal("6.00")
+        first_reading.save(update_fields=["strap_load"])
+        updated_guideline = self.product_model.care_guideline.copy()
+        updated_guideline["note"] = "updated guideline"
+        self.product_model.care_guideline = updated_guideline
+        self.product_model.save(update_fields=["care_guideline"])
+        session = MeasurementSession.objects.select_related(
+            "bag__product_model"
+        ).get(pk=session.pk)
+
+        second_report, second_created = analyze_history_session(session)
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_report.pk, second_report.pk)
+        self.assertEqual(
+            AnalysisReport.objects.filter(session=session).count(), 1
+        )
+        self.assertEqual(second_report.metrics["load"]["max_kg"], 6.0)
+        self.assertEqual(
+            second_report.active_rules, [RuleCode.HIGH_LOAD.value]
+        )
+        self.assertEqual(
+            second_report.care_guideline_snapshot["note"],
+            "updated guideline",
+        )
+
+    def test_care_guideline_snapshot_is_independent(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+        source_guideline = session.bag.product_model.care_guideline
+
+        report, _created = analyze_history_session(session)
+        source_guideline["max_load_kg"] = 999
+
+        self.assertEqual(report.care_guideline_snapshot["max_load_kg"], 5.5)
+
+        self.product_model.care_guideline = {"max_load_kg": 999}
+        self.product_model.save(update_fields=["care_guideline"])
+        report.refresh_from_db()
+
+        self.assertEqual(report.care_guideline_snapshot["max_load_kg"], 5.5)
+
+    def test_rejects_live_session_without_creating_report(self):
+        session = self.create_session(purpose=MeasurementSession.Purpose.LIVE)
+        self.add_uniform_readings(session)
+
+        with self.assertRaisesMessage(ValueError, "Only HISTORY sessions"):
+            analyze_history_session(session)
+
+        self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+    def test_rejects_running_history_without_creating_report(self):
+        session = self.create_session(status=MeasurementSession.Status.RUNNING)
+        self.add_uniform_readings(session)
+
+        with self.assertRaisesMessage(ValueError, "Only COMPLETED sessions"):
+            analyze_history_session(session)
+
+        self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+    def test_rejects_history_without_readings_or_report(self):
+        session = self.create_session()
+
+        with self.assertRaisesMessage(ValueError, "At least one SensorReading"):
+            analyze_history_session(session)
+
+        self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
