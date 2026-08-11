@@ -1266,12 +1266,261 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
         self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
 
 
+class HistoryComparisonOrchestrationTests(HistoryAnalysisTestCase):
+    def create_period(
+        self,
+        started_at,
+        *,
+        strap_load="4.00",
+    ):
+        session = MeasurementSession.objects.create(
+            bag=self.bag,
+            purpose=MeasurementSession.Purpose.HISTORY,
+            seed=12345,
+            started_at=started_at,
+            ended_at=started_at + timedelta(days=7),
+            status=MeasurementSession.Status.COMPLETED,
+        )
+        for sequence in range(7):
+            SensorReading.objects.create(
+                session=session,
+                strap_load=Decimal(strap_load),
+                humidity=Decimal("50.00"),
+                moisture_detected=False,
+                temperature=Decimal("25.00"),
+                measured_at=started_at + timedelta(days=sequence),
+                load_bias=Decimal("0.1000"),
+                body_deformation_ratio=Decimal("0.0100"),
+                sequence=sequence,
+            )
+        return session
+
+    def refresh_for_analysis(self, session):
+        return MeasurementSession.objects.select_related(
+            "bag__product_model"
+        ).get(pk=session.pk)
+
+    def test_saves_available_comparison_without_previous_report(self):
+        previous = self.create_period(self.started_at)
+        current = self.create_period(self.started_at + timedelta(days=7))
+
+        self.assertFalse(
+            AnalysisReport.objects.filter(session=previous).exists()
+        )
+
+        report, created = analyze_history_session(current)
+
+        self.assertTrue(created)
+        self.assertEqual(
+            report.comparison["previous_session_id"],
+            previous.pk,
+        )
+        self.assertTrue(report.comparison["available"])
+        self.assertIsNone(report.comparison["reason"])
+        self.assertEqual(
+            report.comparison["previous_period"],
+            {
+                "started_at": "2026-07-28T09:00:00+09:00",
+                "ended_at": "2026-08-04T09:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        comparison_metrics = report.comparison["metrics"]
+        self.assertEqual(
+            set(comparison_metrics),
+            {
+                "load",
+                "temperature",
+                "humidity",
+                "moisture",
+                "load_bias",
+                "deformation",
+            },
+        )
+        self.assertEqual(
+            sum(len(metrics) for metrics in comparison_metrics.values()),
+            15,
+        )
+        self.assertFalse(
+            AnalysisReport.objects.filter(session=previous).exists()
+        )
+
+    def test_saves_no_previous_period_without_blocking_report(self):
+        current = self.create_period(self.started_at)
+
+        report, created = analyze_history_session(current)
+
+        self.assertTrue(created)
+        self.assertEqual(
+            report.comparison,
+            {
+                "available": False,
+                "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+                "previous_session_id": None,
+                "previous_period": None,
+                "metrics": None,
+            },
+        )
+
+    def test_saves_invalid_period_shape_without_blocking_report(self):
+        current = self.create_period(self.started_at)
+        last_reading = current.readings.get(sequence=6)
+        last_reading.measured_at = current.ended_at
+        last_reading.save(update_fields=["measured_at"])
+
+        report, created = analyze_history_session(current)
+
+        self.assertTrue(created)
+        self.assertFalse(report.comparison["available"])
+        self.assertEqual(
+            report.comparison["reason"],
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE.value,
+        )
+        self.assertIsNone(report.comparison["metrics"])
+
+    def test_saves_ambiguous_previous_period_without_blocking_report(self):
+        self.create_period(self.started_at)
+        self.create_period(self.started_at)
+        current = self.create_period(self.started_at + timedelta(days=7))
+
+        report, created = analyze_history_session(current)
+
+        self.assertTrue(created)
+        self.assertFalse(report.comparison["available"])
+        self.assertEqual(
+            report.comparison["reason"],
+            ComparisonUnavailableReason.AMBIGUOUS_PREVIOUS_PERIOD.value,
+        )
+
+    def test_reanalysis_replaces_available_with_unavailable_snapshot(self):
+        previous = self.create_period(self.started_at)
+        current = self.create_period(self.started_at + timedelta(days=7))
+        first_report, first_created = analyze_history_session(current)
+
+        previous.ended_at -= timedelta(hours=1)
+        previous.save(update_fields=["ended_at"])
+        second_report, second_created = analyze_history_session(current)
+
+        self.assertTrue(first_created)
+        self.assertTrue(first_report.comparison["available"])
+        self.assertFalse(second_created)
+        self.assertEqual(second_report.pk, first_report.pk)
+        self.assertEqual(
+            second_report.comparison,
+            {
+                "available": False,
+                "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+                "previous_session_id": None,
+                "previous_period": None,
+                "metrics": None,
+            },
+        )
+
+    def test_reanalysis_replaces_unavailable_with_available_snapshot(self):
+        current = self.create_period(self.started_at + timedelta(days=7))
+        first_report, first_created = analyze_history_session(current)
+
+        previous = self.create_period(self.started_at)
+        second_report, second_created = analyze_history_session(current)
+
+        self.assertTrue(first_created)
+        self.assertFalse(first_report.comparison["available"])
+        self.assertFalse(second_created)
+        self.assertEqual(second_report.pk, first_report.pk)
+        self.assertTrue(second_report.comparison["available"])
+        self.assertEqual(
+            second_report.comparison["previous_session_id"],
+            previous.pk,
+        )
+
+    def test_reanalysis_uses_current_guideline_for_both_periods(self):
+        old_guideline = deepcopy(self.product_model.care_guideline)
+        old_guideline["max_load_kg"] = 10.0
+        ProductModel.objects.filter(pk=self.product_model.pk).update(
+            care_guideline=old_guideline
+        )
+        previous = self.create_period(self.started_at, strap_load="6.00")
+        current = self.create_period(
+            self.started_at + timedelta(days=7),
+            strap_load="6.00",
+        )
+
+        previous_report, _created = analyze_history_session(
+            self.refresh_for_analysis(previous)
+        )
+        first_current_report, first_created = analyze_history_session(
+            self.refresh_for_analysis(current)
+        )
+        previous_report_updated_at = previous_report.updated_at
+
+        new_guideline = deepcopy(old_guideline)
+        new_guideline["max_load_kg"] = 5.5
+        ProductModel.objects.filter(pk=self.product_model.pk).update(
+            care_guideline=new_guideline
+        )
+        second_current_report, second_created = analyze_history_session(
+            self.refresh_for_analysis(current)
+        )
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(second_current_report.pk, first_current_report.pk)
+        self.assertEqual(
+            second_current_report.care_guideline_snapshot["max_load_kg"],
+            5.5,
+        )
+        self.assertEqual(
+            second_current_report.metrics["load"]["overload_detected_days"],
+            7,
+        )
+        overload_comparison = second_current_report.comparison["metrics"][
+            "load"
+        ]["overload_detected_days"]
+        self.assertEqual(overload_comparison["current"], 7)
+        self.assertEqual(overload_comparison["previous"], 7)
+
+        previous_report.refresh_from_db()
+        self.assertEqual(previous_report.updated_at, previous_report_updated_at)
+        self.assertEqual(
+            previous_report.care_guideline_snapshot["max_load_kg"],
+            10.0,
+        )
+        self.assertEqual(
+            previous_report.metrics["load"]["overload_detected_days"],
+            0,
+        )
+
+    def test_stored_comparison_does_not_change_without_reanalysis(self):
+        previous = self.create_period(self.started_at)
+        current = self.create_period(self.started_at + timedelta(days=7))
+        report, _created = analyze_history_session(current)
+        stored_comparison = deepcopy(report.comparison)
+        stored_updated_at = report.updated_at
+
+        previous_reading = previous.readings.get(sequence=0)
+        previous_reading.strap_load = Decimal("9.00")
+        previous_reading.save(update_fields=["strap_load"])
+        changed_guideline = deepcopy(self.product_model.care_guideline)
+        changed_guideline["max_load_kg"] = 1.0
+        ProductModel.objects.filter(pk=self.product_model.pk).update(
+            care_guideline=changed_guideline
+        )
+
+        report.refresh_from_db()
+
+        self.assertEqual(report.comparison, stored_comparison)
+        self.assertEqual(report.updated_at, stored_updated_at)
+
+
 class AnalysisReportComparisonFieldTests(HistoryAnalysisTestCase):
     def test_defaults_comparison_to_empty_dict(self):
         session = self.create_session()
-        self.add_uniform_readings(session)
-
-        report, _created = analyze_history_session(session)
+        report = AnalysisReport.objects.create(
+            session=session,
+            metrics={},
+            severity=Severity.NORMAL.value,
+            care_guideline_snapshot={},
+        )
 
         self.assertEqual(report.comparison, {})
 
@@ -1371,8 +1620,12 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
         session = self.create_session()
         session.ended_at = None
         session.save(update_fields=["ended_at"])
-        self.add_readings(session)
-        report, _created = analyze_history_session(session)
+        report = AnalysisReport.objects.create(
+            session=session,
+            metrics={},
+            severity=Severity.NORMAL.value,
+            care_guideline_snapshot={},
+        )
 
         data = AnalysisReportSerializer(report).data
 
@@ -1489,6 +1742,11 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             AnalysisReport.objects.filter(session=session).exists()
         )
         report = AnalysisReport.objects.get(session=session)
+        self.assertNotIn("comparison", response.data)
+        self.assertEqual(
+            report.comparison["reason"],
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+        )
         self.assertEqual(
             response.data["metrics"]["daily_series"],
             report.metrics["daily_series"],
