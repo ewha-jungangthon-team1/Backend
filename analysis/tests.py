@@ -15,6 +15,10 @@ from measurements.models import MeasurementSession, SensorReading
 from products.models import Bag, ProductModel
 from simulation.models import SimulationScenario
 
+from .comparisons import (
+    ComparisonUnavailableReason,
+    find_previous_history_session,
+)
 from .constants import RuleCode, Severity
 from .metrics import build_history_daily_series, calculate_history_metrics
 from .models import AnalysisReport
@@ -306,6 +310,368 @@ class HistoryDailySeriesTests(HistoryAnalysisTestCase):
         rendered = JSONRenderer().render(build_history_daily_series(session))
 
         self.assertEqual(len(json.loads(rendered)), 7)
+
+
+class PreviousHistorySessionSelectorTests(HistoryAnalysisTestCase):
+    def create_period(
+        self,
+        *,
+        started_at,
+        bag=None,
+        purpose=MeasurementSession.Purpose.HISTORY,
+        status=MeasurementSession.Status.COMPLETED,
+        duration_days=7,
+        reading_count=7,
+        date_offsets=None,
+        measured_at_values=None,
+        sequences=None,
+        scenario=None,
+    ):
+        session = MeasurementSession.objects.create(
+            bag=bag or self.bag,
+            scenario=scenario,
+            purpose=purpose,
+            seed=12345,
+            started_at=started_at,
+            ended_at=started_at + timedelta(days=duration_days),
+            status=status,
+        )
+        if date_offsets is None:
+            date_offsets = list(range(reading_count))
+        if sequences is None:
+            sequences = list(range(reading_count))
+
+        for index in range(reading_count):
+            SensorReading.objects.create(
+                session=session,
+                strap_load=Decimal("4.00"),
+                humidity=Decimal("50.00"),
+                moisture_detected=False,
+                temperature=Decimal("25.00"),
+                measured_at=(
+                    measured_at_values[index]
+                    if measured_at_values is not None
+                    else started_at + timedelta(days=date_offsets[index])
+                ),
+                load_bias=Decimal("0.1000"),
+                body_deformation_ratio=Decimal("0.0100"),
+                sequence=sequences[index],
+            )
+        return session
+
+    def create_other_bag(self, nfc_uid):
+        return Bag.objects.create(
+            product_model=self.product_model,
+            owner=self.bag.owner,
+            nfc_uid=nfc_uid,
+        )
+
+    def test_selects_valid_contiguous_previous_period(self):
+        previous = self.create_period(started_at=self.started_at)
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertTrue(result.is_available)
+        self.assertEqual(result.previous_session, previous)
+        self.assertIsNone(result.reason)
+
+    def test_allows_different_scenarios_when_periods_are_contiguous(self):
+        previous_scenario = self.create_scenario("NORMAL_HISTORY")
+        current_scenario = self.create_scenario("OVERLOAD_HISTORY")
+        previous = self.create_period(
+            started_at=self.started_at,
+            scenario=previous_scenario,
+        )
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7),
+            scenario=current_scenario,
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(result.previous_session, previous)
+        self.assertNotEqual(previous.scenario_id, current.scenario_id)
+
+    def test_excludes_contiguous_session_from_different_bag(self):
+        other_bag = self.create_other_bag("OTHER-BAG-CONTIGUOUS")
+        self.create_period(started_at=self.started_at, bag=other_bag)
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertIsNone(result.previous_session)
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
+        )
+
+    def test_excludes_live_candidate(self):
+        self.create_period(
+            started_at=self.started_at,
+            purpose=MeasurementSession.Purpose.LIVE,
+        )
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
+        )
+
+    def test_excludes_running_history_candidate(self):
+        self.create_period(
+            started_at=self.started_at,
+            status=MeasurementSession.Status.RUNNING,
+        )
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
+        )
+
+    def test_returns_no_previous_period_without_exact_candidate(self):
+        current = self.create_period(started_at=self.started_at)
+
+        result = find_previous_history_session(current)
+
+        self.assertFalse(result.is_available)
+        self.assertIsNone(result.previous_session)
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
+        )
+
+    def test_selects_exact_previous_despite_other_overlapping_history(self):
+        previous = self.create_period(started_at=self.started_at)
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+        self.create_period(
+            started_at=current.started_at + timedelta(days=1)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertTrue(result.is_available)
+        self.assertEqual(result.previous_session, previous)
+        self.assertIsNone(result.reason)
+
+    def test_returns_no_previous_when_only_overlapping_history_exists(self):
+        current = self.create_period(started_at=self.started_at)
+        self.create_period(
+            started_at=current.started_at + timedelta(days=1)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertFalse(result.is_available)
+        self.assertIsNone(result.previous_session)
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
+        )
+
+    def test_boundary_touching_previous_is_not_overlap(self):
+        previous = self.create_period(started_at=self.started_at)
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(result.previous_session, previous)
+        self.assertIsNone(result.reason)
+
+    def test_returns_ambiguous_when_two_previous_candidates_match(self):
+        self.create_period(started_at=self.started_at)
+        self.create_period(started_at=self.started_at)
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertIsNone(result.previous_session)
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.AMBIGUOUS_PREVIOUS_PERIOD,
+        )
+
+    def test_returns_invalid_shape_for_non_seven_day_current(self):
+        current = self.create_period(
+            started_at=self.started_at,
+            duration_days=6,
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_for_current_with_wrong_reading_count(self):
+        current = self.create_period(
+            started_at=self.started_at,
+            reading_count=6,
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_for_duplicate_local_dates(self):
+        current = self.create_period(
+            started_at=self.started_at,
+            date_offsets=[0, 1, 2, 3, 4, 5, 5],
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_when_dates_are_shifted_by_one_day(self):
+        measured_at_values = [
+            self.started_at + timedelta(days=offset)
+            for offset in range(1, 7)
+        ]
+        measured_at_values.append(
+            self.started_at + timedelta(days=7, hours=-1)
+        )
+        current = self.create_period(
+            started_at=self.started_at,
+            measured_at_values=measured_at_values,
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_when_reading_precedes_period_start(self):
+        measured_at_values = [
+            self.started_at + timedelta(days=offset)
+            for offset in range(7)
+        ]
+        measured_at_values[0] = self.started_at - timedelta(hours=1)
+        current = self.create_period(
+            started_at=self.started_at,
+            measured_at_values=measured_at_values,
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_when_reading_is_at_exclusive_period_end(self):
+        measured_at_values = [
+            self.started_at + timedelta(days=offset)
+            for offset in range(7)
+        ]
+        measured_at_values[-1] = self.started_at + timedelta(days=7)
+        current = self.create_period(
+            started_at=self.started_at,
+            measured_at_values=measured_at_values,
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_for_nonstandard_sequences(self):
+        current = self.create_period(
+            started_at=self.started_at,
+            sequences=[1, 2, 3, 4, 5, 6, 7],
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_returns_invalid_shape_when_previous_shape_is_invalid(self):
+        self.create_period(
+            started_at=self.started_at,
+            reading_count=6,
+        )
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertIsNone(result.previous_session)
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.INVALID_PERIOD_SHAPE,
+        )
+
+    def test_ignores_created_at_and_pk_order(self):
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+        previous = self.create_period(started_at=self.started_at)
+
+        result = find_previous_history_session(current)
+
+        self.assertGreater(previous.pk, current.pk)
+        self.assertGreater(previous.created_at, current.created_at)
+        self.assertEqual(result.previous_session, previous)
+
+    def test_rejects_invalid_current_session_inputs(self):
+        with self.assertRaisesMessage(ValueError, "current_session is required"):
+            find_previous_history_session(None)
+
+        live = self.create_period(
+            started_at=self.started_at,
+            purpose=MeasurementSession.Purpose.LIVE,
+        )
+        with self.assertRaisesMessage(ValueError, "Only HISTORY sessions"):
+            find_previous_history_session(live)
+
+        running = self.create_period(
+            started_at=self.started_at,
+            status=MeasurementSession.Status.RUNNING,
+        )
+        with self.assertRaisesMessage(ValueError, "Only COMPLETED sessions"):
+            find_previous_history_session(running)
+
+        missing_end = self.create_period(
+            started_at=self.started_at,
+        )
+        missing_end.ended_at = None
+        missing_end.save(update_fields=["ended_at"])
+        with self.assertRaisesMessage(ValueError, "started_at and ended_at"):
+            find_previous_history_session(missing_end)
 
 
 class HistoryRuleEngineTests(HistoryAnalysisTestCase):
