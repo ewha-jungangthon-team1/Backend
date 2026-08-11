@@ -27,8 +27,19 @@ class HistoryAnalysisTestCase(TestCase):
             material="Leather",
             care_guideline={
                 "avoid_moisture": True,
-                "max_load_kg": 8,
+                "max_load_kg": 5.5,
                 "recommended_temp_range_c": [0, 35],
+                "max_humidity_percent": 70,
+                "max_abs_load_bias": 0.30,
+                "max_body_deformation_ratio": 0.03,
+                "care_actions": {
+                    rule_code.value: {
+                        "title": f"{rule_code.value} care",
+                        "reason": f"{rule_code.value} reason",
+                        "steps": [f"{rule_code.value} step"],
+                    }
+                    for rule_code in RuleCode
+                },
             },
         )
         cls.bag = Bag.objects.create(
@@ -79,7 +90,7 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
         self.assertEqual(metrics["reading_count"], 7)
         self.assertEqual(metrics["load"]["average_kg"], 7.0)
         self.assertEqual(metrics["load"]["max_kg"], 10.0)
-        self.assertEqual(metrics["load"]["overload_detected_days"], 2)
+        self.assertEqual(metrics["load"]["overload_detected_days"], 5)
         self.assertAlmostEqual(metrics["temperature"]["average_c"], 220 / 7)
         self.assertEqual(metrics["temperature"]["max_c"], 40.0)
         self.assertEqual(
@@ -87,14 +98,24 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
         )
         self.assertEqual(metrics["humidity"]["average_percent"], 70.0)
         self.assertEqual(metrics["humidity"]["max_percent"], 100.0)
+        self.assertEqual(metrics["humidity"]["high_humidity_detected_days"], 3)
         self.assertEqual(metrics["moisture"]["detected_days"], 2)
         self.assertTrue(metrics["moisture"]["detected_any"])
         self.assertEqual(metrics["load_bias"]["max_absolute"], 0.9)
         self.assertEqual(metrics["load_bias"]["latest"], 0.3)
+        self.assertEqual(metrics["load_bias"]["biased_days"], 4)
         self.assertEqual(metrics["deformation"]["max_ratio"], 0.06)
         self.assertEqual(metrics["deformation"]["latest_ratio"], 0.06)
+        self.assertEqual(metrics["deformation"]["deformation_detected_days"], 3)
 
     def test_marks_missing_threshold_metrics_unavailable(self):
+        self.product_model.care_guideline = {
+            "avoid_moisture": True,
+            "max_load_kg": 5.5,
+            "recommended_temp_range_c": [0, 35],
+        }
+        self.product_model.save(update_fields=["care_guideline"])
+        self.bag.refresh_from_db()
         session = self.create_session()
         self.add_readings(session)
 
@@ -105,23 +126,14 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
         self.assertIsNone(metrics["deformation"]["deformation_detected_days"])
 
     def test_uses_optional_thresholds_when_they_are_configured(self):
-        self.product_model.care_guideline.update(
-            {
-                "max_humidity_percent": 75,
-                "max_abs_load_bias": 0.6,
-                "max_body_deformation_ratio": 0.04,
-            }
-        )
-        self.product_model.save(update_fields=["care_guideline"])
-        self.bag.refresh_from_db()
         session = self.create_session()
         self.add_readings(session)
 
         metrics = calculate_history_metrics(session)
 
         self.assertEqual(metrics["humidity"]["high_humidity_detected_days"], 3)
-        self.assertEqual(metrics["load_bias"]["biased_days"], 2)
-        self.assertEqual(metrics["deformation"]["deformation_detected_days"], 2)
+        self.assertEqual(metrics["load_bias"]["biased_days"], 4)
+        self.assertEqual(metrics["deformation"]["deformation_detected_days"], 3)
 
     def test_result_is_json_serializable(self):
         session = self.create_session()
