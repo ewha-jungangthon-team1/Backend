@@ -4,6 +4,7 @@ from rest_framework.response import Response
 
 from measurements.models import MeasurementSession
 
+from .models import AnalysisReport
 from .serializers import AnalysisReportSerializer
 from .services import analyze_history_session
 
@@ -32,3 +33,19 @@ def analyze_history_session_view(request, session_id):
     serializer = AnalysisReportSerializer(report)
     response_data = {"created": created, **serializer.data}
     return Response(response_data, status=http_status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+def analysis_report_detail_view(request, report_id):
+    try:
+        report = AnalysisReport.objects.select_related(
+            "session__scenario"
+        ).get(id=report_id)
+    except AnalysisReport.DoesNotExist:
+        return Response(
+            {"detail": "존재하지 않는 분석 리포트입니다."},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
+
+    serializer = AnalysisReportSerializer(report)
+    return Response(serializer.data, status=http_status.HTTP_200_OK)

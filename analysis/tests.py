@@ -1,4 +1,5 @@
 import json
+from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -109,6 +110,17 @@ class HistoryAnalysisTestCase(TestCase):
                 body_deformation_ratio=Decimal(body_deformation_ratio),
                 sequence=sequence,
             )
+
+    def create_scenario(self, code="NORMAL_HISTORY"):
+        return SimulationScenario.objects.create(
+            code=code,
+            name="Normal History",
+            scenario_type=SimulationScenario.ScenarioType.NORMAL,
+            mode=SimulationScenario.Mode.HISTORY,
+            logical_duration_seconds=604800,
+            sample_interval_seconds=86400,
+            config={},
+        )
 
 
 class HistoryMetricsTests(HistoryAnalysisTestCase):
@@ -392,17 +404,6 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
 
 
 class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
-    def create_scenario(self, code="NORMAL_HISTORY"):
-        return SimulationScenario.objects.create(
-            code=code,
-            name="Normal History",
-            scenario_type=SimulationScenario.ScenarioType.NORMAL,
-            mode=SimulationScenario.Mode.HISTORY,
-            logical_duration_seconds=604800,
-            sample_interval_seconds=86400,
-            config={},
-        )
-
     def test_serializes_analysis_report_fields_and_values(self):
         scenario = self.create_scenario()
         session = self.create_session()
@@ -584,3 +585,101 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("detail", response.data)
         self.assertFalse(AnalysisReport.objects.filter(session=session).exists())
+
+
+class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
+    def setUp(self):
+        self.client = APIClient()
+
+    def get_url(self, report_id):
+        return reverse(
+            "analysis-report-detail",
+            kwargs={"report_id": report_id},
+        )
+
+    def create_report(self, *, with_scenario=True):
+        session = self.create_session()
+        if with_scenario:
+            session.scenario = self.create_scenario()
+            session.save(update_fields=["scenario"])
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+        return session, report
+
+    def test_retrieves_stored_report(self):
+        session, report = self.create_report()
+
+        response = self.client.get(self.get_url(report.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.data),
+            {
+                "id",
+                "session_id",
+                "scenario_code",
+                "metrics",
+                "severity",
+                "active_rules",
+                "unavailable_rules",
+                "care_guideline_snapshot",
+                "created_at",
+                "updated_at",
+            },
+        )
+        self.assertNotIn("created", response.data)
+        self.assertEqual(response.data["id"], report.id)
+        self.assertEqual(response.data["session_id"], session.id)
+        self.assertEqual(
+            response.data["scenario_code"], session.scenario.code
+        )
+        self.assertEqual(response.data["metrics"], report.metrics)
+        self.assertEqual(response.data["severity"], report.severity)
+        self.assertEqual(response.data["active_rules"], report.active_rules)
+        self.assertEqual(
+            response.data["unavailable_rules"], report.unavailable_rules
+        )
+        self.assertEqual(
+            response.data["care_guideline_snapshot"],
+            report.care_guideline_snapshot,
+        )
+
+    def test_returns_404_for_missing_report(self):
+        response = self.client.get(self.get_url(999999))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("detail", response.data)
+
+    def test_get_does_not_reanalyze_or_update_report(self):
+        session, report = self.create_report()
+        original_metrics = deepcopy(report.metrics)
+        original_snapshot = deepcopy(report.care_guideline_snapshot)
+        original_updated_at = report.updated_at
+        original_count = AnalysisReport.objects.count()
+
+        first_reading = session.readings.order_by("sequence").first()
+        first_reading.strap_load = Decimal("99.00")
+        first_reading.save(update_fields=["strap_load"])
+        self.product_model.care_guideline = {"max_load_kg": 999}
+        self.product_model.save(update_fields=["care_guideline"])
+
+        response = self.client.get(self.get_url(report.id))
+        report.refresh_from_db()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(AnalysisReport.objects.count(), original_count)
+        self.assertEqual(report.updated_at, original_updated_at)
+        self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(report.care_guideline_snapshot, original_snapshot)
+        self.assertEqual(response.data["metrics"], original_metrics)
+        self.assertEqual(
+            response.data["care_guideline_snapshot"], original_snapshot
+        )
+
+    def test_retrieves_report_with_null_scenario(self):
+        _session, report = self.create_report(with_scenario=False)
+
+        response = self.client.get(self.get_url(report.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["scenario_code"])
