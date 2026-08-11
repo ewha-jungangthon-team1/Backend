@@ -187,6 +187,18 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
 
         json.dumps(metrics)
 
+    def test_includes_daily_series_built_by_shared_builder(self):
+        session = self.create_session()
+        self.add_readings(session)
+
+        metrics = calculate_history_metrics(session)
+
+        self.assertEqual(len(metrics["daily_series"]), 7)
+        self.assertEqual(
+            metrics["daily_series"],
+            build_history_daily_series(session),
+        )
+
     def test_rejects_missing_session(self):
         with self.assertRaisesMessage(ValueError, "session is required"):
             calculate_history_metrics(None)
@@ -387,6 +399,10 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
         self.assertEqual(report.session, session)
         self.assertEqual(report.severity, Severity.NORMAL.value)
         self.assertEqual(report.active_rules, [])
+        self.assertEqual(
+            report.metrics["daily_series"],
+            build_history_daily_series(session),
+        )
 
     def test_creates_single_risk_history_report(self):
         session = self.create_session()
@@ -437,6 +453,10 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
             AnalysisReport.objects.filter(session=session).count(), 1
         )
         self.assertEqual(second_report.metrics["load"]["max_kg"], 6.0)
+        self.assertEqual(
+            second_report.metrics["daily_series"][0]["load_kg"],
+            6.0,
+        )
         self.assertEqual(
             second_report.active_rules, [RuleCode.HIGH_LOAD.value]
         )
@@ -577,6 +597,17 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         self.assertEqual(response.data["session_id"], session.id)
         self.assertEqual(response.data["severity"], Severity.NORMAL.value)
         self.assertEqual(response.data["active_rules"], [])
+        self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
+        self.assertEqual(
+            response.data["metrics"]["daily_series"][0],
+            {
+                "date": "2026-07-28",
+                "load_kg": 4.0,
+                "deformation_ratio": 0.01,
+                "deformation_percent": 1.0,
+                "moisture_detected": False,
+            },
+        )
         self.assertEqual(
             set(response.data),
             {
@@ -595,6 +626,11 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         )
         self.assertTrue(
             AnalysisReport.objects.filter(session=session).exists()
+        )
+        report = AnalysisReport.objects.get(session=session)
+        self.assertEqual(
+            response.data["metrics"]["daily_series"],
+            report.metrics["daily_series"],
         )
 
     def test_analyzes_risk_history_and_ignores_request_values(self):
@@ -624,6 +660,9 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         url = self.get_url(session.id)
 
         first_response = self.client.post(url, {}, format="json")
+        first_reading = session.readings.order_by("sequence").first()
+        first_reading.strap_load = Decimal("6.00")
+        first_reading.save(update_fields=["strap_load"])
         second_response = self.client.post(url, {}, format="json")
 
         self.assertEqual(first_response.status_code, 200)
@@ -634,6 +673,15 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         self.assertEqual(
             AnalysisReport.objects.filter(session=session).count(), 1
         )
+        self.assertEqual(
+            first_response.data["metrics"]["daily_series"][0]["load_kg"],
+            4.0,
+        )
+        self.assertEqual(
+            second_response.data["metrics"]["daily_series"][0]["load_kg"],
+            6.0,
+        )
+        self.assertEqual(second_response.data["metrics"]["load"]["max_kg"], 6.0)
 
     def test_returns_404_for_missing_session(self):
         response = self.client.post(self.get_url(999999))
@@ -719,6 +767,11 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             response.data["scenario_code"], session.scenario.code
         )
         self.assertEqual(response.data["metrics"], report.metrics)
+        self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
+        self.assertEqual(
+            response.data["metrics"]["daily_series"],
+            report.metrics["daily_series"],
+        )
         self.assertEqual(response.data["severity"], report.severity)
         self.assertEqual(response.data["active_rules"], report.active_rules)
         self.assertEqual(
@@ -755,6 +808,18 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(AnalysisReport.objects.count(), original_count)
         self.assertEqual(report.updated_at, original_updated_at)
         self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(
+            report.metrics["daily_series"],
+            original_metrics["daily_series"],
+        )
+        self.assertEqual(
+            response.data["metrics"]["daily_series"],
+            original_metrics["daily_series"],
+        )
+        self.assertEqual(
+            response.data["metrics"]["daily_series"][0]["load_kg"],
+            4.0,
+        )
         self.assertEqual(report.care_guideline_snapshot, original_snapshot)
         self.assertEqual(response.data["metrics"], original_metrics)
         self.assertEqual(

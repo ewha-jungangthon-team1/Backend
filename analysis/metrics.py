@@ -134,4 +134,5 @@ def calculate_history_metrics(session):
                 deformations, thresholds["max_body_deformation_ratio"]
             ),
         },
+        "daily_series": build_history_daily_series(session),
     }
