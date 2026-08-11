@@ -17,6 +17,7 @@ from simulation.models import SimulationScenario
 
 from .comparisons import (
     ComparisonUnavailableReason,
+    build_history_metric_comparison,
     find_previous_history_session,
 )
 from .constants import RuleCode, Severity
@@ -672,6 +673,326 @@ class PreviousHistorySessionSelectorTests(HistoryAnalysisTestCase):
         missing_end.save(update_fields=["ended_at"])
         with self.assertRaisesMessage(ValueError, "started_at and ended_at"):
             find_previous_history_session(missing_end)
+
+
+class HistoryMetricComparisonTests(TestCase):
+    def build_metrics_pair(self):
+        current = {
+            "reading_count": 7,
+            "load": {
+                "average_kg": 5.0,
+                "max_kg": 7.0,
+                "overload_detected_days": 3,
+            },
+            "temperature": {
+                "average_c": 30.0,
+                "max_c": 35.0,
+                "high_temperature_detected_days": 2,
+            },
+            "humidity": {
+                "average_percent": 60.0,
+                "max_percent": 75.0,
+                "high_humidity_detected_days": 2,
+            },
+            "moisture": {
+                "detected_days": 1,
+                "detected_any": True,
+            },
+            "load_bias": {
+                "max_absolute": 0.30,
+                "latest": -0.10,
+                "biased_days": 2,
+            },
+            "deformation": {
+                "latest_ratio": 0.025,
+                "max_ratio": 0.04,
+                "deformation_detected_days": 2,
+            },
+            "daily_series": [{"date": "2026-08-04"}],
+        }
+        previous = {
+            "reading_count": 7,
+            "load": {
+                "average_kg": 4.0,
+                "max_kg": 6.0,
+                "overload_detected_days": 0,
+            },
+            "temperature": {
+                "average_c": 25.0,
+                "max_c": 32.0,
+                "high_temperature_detected_days": 1,
+            },
+            "humidity": {
+                "average_percent": 50.0,
+                "max_percent": 70.0,
+                "high_humidity_detected_days": 1,
+            },
+            "moisture": {
+                "detected_days": 0,
+                "detected_any": False,
+            },
+            "load_bias": {
+                "max_absolute": 0.20,
+                "latest": 0.10,
+                "biased_days": 1,
+            },
+            "deformation": {
+                "latest_ratio": 0.01,
+                "max_ratio": 0.03,
+                "deformation_detected_days": 1,
+            },
+            "daily_series": [{"date": "2026-07-28"}],
+        }
+        return current, previous
+
+    def test_builds_exact_six_domains_and_fifteen_metrics(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            set(comparison),
+            {
+                "load",
+                "temperature",
+                "humidity",
+                "moisture",
+                "load_bias",
+                "deformation",
+            },
+        )
+        self.assertEqual(
+            {domain: set(metrics) for domain, metrics in comparison.items()},
+            {
+                "load": {"average_kg", "max_kg", "overload_detected_days"},
+                "temperature": {
+                    "average_c",
+                    "max_c",
+                    "high_temperature_detected_days",
+                },
+                "humidity": {
+                    "average_percent",
+                    "max_percent",
+                    "high_humidity_detected_days",
+                },
+                "moisture": {"detected_days"},
+                "load_bias": {"max_absolute_percent", "biased_days"},
+                "deformation": {
+                    "latest_percent",
+                    "max_percent",
+                    "deformation_detected_days",
+                },
+            },
+        )
+
+    def test_compares_average_load(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["load"]["average_kg"],
+            {
+                "current": 5.0,
+                "previous": 4.0,
+                "change": 1.0,
+                "change_percent": 25.0,
+            },
+        )
+
+    def test_zero_to_positive_has_null_relative_change(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["load"]["overload_detected_days"],
+            {
+                "current": 3,
+                "previous": 0,
+                "change": 3,
+                "change_percent": None,
+            },
+        )
+
+    def test_zero_to_zero_has_zero_relative_change(self):
+        current, previous = self.build_metrics_pair()
+        current["moisture"]["detected_days"] = 0
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["moisture"]["detected_days"],
+            {
+                "current": 0,
+                "previous": 0,
+                "change": 0,
+                "change_percent": 0.0,
+            },
+        )
+
+    def test_none_value_preserves_inputs_and_nulls_changes(self):
+        current, previous = self.build_metrics_pair()
+        previous["humidity"]["high_humidity_detected_days"] = None
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["humidity"]["high_humidity_detected_days"],
+            {
+                "current": 2,
+                "previous": None,
+                "change": None,
+                "change_percent": None,
+            },
+        )
+
+    def test_temperature_uses_absolute_change_only(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["temperature"]["average_c"],
+            {
+                "current": 30.0,
+                "previous": 25.0,
+                "change": 5.0,
+                "change_percent": None,
+            },
+        )
+        self.assertEqual(
+            comparison["temperature"]["max_c"]["change_percent"],
+            None,
+        )
+        self.assertEqual(
+            comparison["temperature"]["high_temperature_detected_days"][
+                "change_percent"
+            ],
+            100.0,
+        )
+
+    def test_humidity_uses_percentage_points_and_relative_change(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["humidity"]["average_percent"],
+            {
+                "current": 60.0,
+                "previous": 50.0,
+                "change": 10.0,
+                "change_percent": 20.0,
+            },
+        )
+
+    def test_converts_load_bias_ratio_to_percent_values(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["load_bias"]["max_absolute_percent"],
+            {
+                "current": 30.0,
+                "previous": 20.0,
+                "change": 10.0,
+                "change_percent": 50.0,
+            },
+        )
+
+    def test_converts_deformation_ratios_to_percent_values(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["deformation"]["latest_percent"],
+            {
+                "current": 2.5,
+                "previous": 1.0,
+                "change": 1.5,
+                "change_percent": 150.0,
+            },
+        )
+        self.assertEqual(
+            comparison["deformation"]["max_percent"],
+            {
+                "current": 4.0,
+                "previous": 3.0,
+                "change": 1.0,
+                "change_percent": 33.33,
+            },
+        )
+
+    def test_preserves_integer_types_for_count_values(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        count_paths = [
+            ("load", "overload_detected_days"),
+            ("temperature", "high_temperature_detected_days"),
+            ("humidity", "high_humidity_detected_days"),
+            ("moisture", "detected_days"),
+            ("load_bias", "biased_days"),
+            ("deformation", "deformation_detected_days"),
+        ]
+        for domain, metric_name in count_paths:
+            with self.subTest(domain=domain, metric_name=metric_name):
+                values = comparison[domain][metric_name]
+                self.assertIsInstance(values["current"], int)
+                self.assertIsInstance(values["previous"], int)
+                self.assertIsInstance(values["change"], int)
+
+    def test_calculates_with_raw_values_before_rounding_payload(self):
+        current, previous = self.build_metrics_pair()
+        current["load"]["average_kg"] = 1.005
+        previous["load"]["average_kg"] = 1.004
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        self.assertEqual(
+            comparison["load"]["average_kg"],
+            {
+                "current": 1.01,
+                "previous": 1.0,
+                "change": 0.0,
+                "change_percent": 0.1,
+            },
+        )
+
+    def test_rejects_missing_required_metric_and_invalid_input_contract(self):
+        current, previous = self.build_metrics_pair()
+        del current["load"]["average_kg"]
+
+        with self.assertRaisesMessage(
+            ValueError,
+            "current_metrics.load.average_kg",
+        ):
+            build_history_metric_comparison(current, previous)
+
+        with self.assertRaisesMessage(ValueError, "current_metrics must be a mapping"):
+            build_history_metric_comparison([], previous)
+
+    def test_does_not_mutate_input_metrics(self):
+        current, previous = self.build_metrics_pair()
+        original_current = deepcopy(current)
+        original_previous = deepcopy(previous)
+
+        build_history_metric_comparison(current, previous)
+
+        self.assertEqual(current, original_current)
+        self.assertEqual(previous, original_previous)
+
+    def test_comparison_payload_is_json_serializable(self):
+        current, previous = self.build_metrics_pair()
+
+        comparison = build_history_metric_comparison(current, previous)
+
+        json.dumps(comparison, allow_nan=False)
+        JSONRenderer().render(comparison)
 
 
 class HistoryRuleEngineTests(HistoryAnalysisTestCase):
