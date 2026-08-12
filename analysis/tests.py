@@ -15,6 +15,13 @@ from measurements.models import MeasurementSession, SensorReading
 from products.models import Bag, ProductModel
 from simulation.models import SimulationScenario
 
+from .ai import (
+    HISTORY_AI_CONTENT_SCHEMA,
+    HistoryAIContentValidationError,
+    build_history_ai_context,
+    build_history_ai_fallback,
+    validate_history_ai_content,
+)
 from .comparisons import (
     ComparisonUnavailableReason,
     build_history_metric_comparison,
@@ -2129,3 +2136,469 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.data["scenario_code"])
+
+
+class HistoryAITestCase(HistoryAnalysisTestCase):
+    def create_period(
+        self,
+        started_at,
+        *,
+        strap_load="4.00",
+        moisture_detected=False,
+        load_bias="0.1000",
+        body_deformation_ratio="0.0100",
+    ):
+        session = MeasurementSession.objects.create(
+            bag=self.bag,
+            purpose=MeasurementSession.Purpose.HISTORY,
+            seed=12345,
+            started_at=started_at,
+            ended_at=started_at + timedelta(days=7),
+            status=MeasurementSession.Status.COMPLETED,
+        )
+        self.add_uniform_readings(
+            session,
+            strap_load=strap_load,
+            moisture_detected=moisture_detected,
+            load_bias=load_bias,
+            body_deformation_ratio=body_deformation_ratio,
+        )
+        return session
+
+    def create_normal_report(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+        report, _created = analyze_history_session(session)
+        return report
+
+    def create_warning_report(self):
+        session = self.create_session()
+        self.add_uniform_readings(session, strap_load="6.00")
+        report, _created = analyze_history_session(session)
+        return report
+
+    def create_available_comparison_report(self):
+        self.create_period(self.started_at, strap_load="4.00")
+        current = self.create_period(
+            self.started_at + timedelta(days=7),
+            strap_load="6.00",
+        )
+        report, _created = analyze_history_session(current)
+        return report
+
+    def set_comparison_metrics(self, report, metrics):
+        report.comparison = {
+            "available": True,
+            "reason": None,
+            "previous_session_id": 999,
+            "previous_period": {
+                "started_at": "2026-07-28T09:00:00+09:00",
+                "ended_at": "2026-08-04T09:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
+            "metrics": metrics,
+        }
+
+
+class HistoryAIContextTests(HistoryAITestCase):
+    def test_builds_normal_history_report_context(self):
+        report = self.create_normal_report()
+
+        context = build_history_ai_context(report)
+
+        self.assertEqual(
+            set(context),
+            {
+                "period",
+                "metrics",
+                "severity",
+                "active_rules",
+                "unavailable_rules",
+                "care_guideline_snapshot",
+                "comparison",
+            },
+        )
+        self.assertEqual(context["severity"], Severity.NORMAL.value)
+        self.assertEqual(context["active_rules"], [])
+        self.assertEqual(context["period"]["timezone"], "Asia/Seoul")
+        self.assertEqual(
+            context["period"]["started_at"],
+            "2026-07-28T09:00:00+09:00",
+        )
+
+    def test_builds_warning_history_report_context(self):
+        report = self.create_warning_report()
+
+        context = build_history_ai_context(report)
+
+        self.assertEqual(context["severity"], Severity.WARNING.value)
+        self.assertEqual(context["active_rules"], [RuleCode.HIGH_LOAD.value])
+        self.assertEqual(context["metrics"]["load"]["overload_detected_days"], 7)
+
+    def test_preserves_available_comparison_without_session_id(self):
+        report = self.create_available_comparison_report()
+
+        context = build_history_ai_context(report)
+
+        self.assertTrue(context["comparison"]["available"])
+        self.assertIsNone(context["comparison"]["reason"])
+        self.assertIn("load", context["comparison"]["metrics"])
+        self.assertNotIn("previous_session_id", context["comparison"])
+
+    def test_preserves_unavailable_comparison(self):
+        report = self.create_normal_report()
+
+        context = build_history_ai_context(report)
+
+        self.assertEqual(
+            context["comparison"],
+            {
+                "available": False,
+                "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
+                "previous_period": None,
+                "metrics": None,
+            },
+        )
+
+    def test_excludes_daily_series_from_metrics(self):
+        report = self.create_normal_report()
+
+        context = build_history_ai_context(report)
+
+        self.assertEqual(
+            set(context["metrics"]),
+            {
+                "load",
+                "temperature",
+                "humidity",
+                "moisture",
+                "load_bias",
+                "deformation",
+            },
+        )
+        self.assertNotIn("daily_series", context["metrics"])
+        self.assertNotIn("reading_count", context["metrics"])
+
+    def test_excludes_scenario_data(self):
+        scenario = self.create_scenario(code="OVERLOAD_HISTORY")
+        session = self.create_session()
+        session.scenario = scenario
+        session.save(update_fields=["scenario"])
+        self.add_uniform_readings(session, strap_load="6.00")
+        report, _created = analyze_history_session(session)
+
+        context = build_history_ai_context(report)
+        serialized = json.dumps(context)
+
+        self.assertNotIn("scenario", serialized.lower())
+        self.assertNotIn("OVERLOAD_HISTORY", serialized)
+
+    def test_excludes_public_identifiers_and_database_ids(self):
+        report = self.create_normal_report()
+
+        context = build_history_ai_context(report)
+        serialized = json.dumps(context)
+
+        self.assertNotIn(str(report.pk), set(context))
+        self.assertNotIn("public_token", serialized)
+        self.assertNotIn("nfc", serialized.lower())
+        self.assertNotIn("owner", serialized.lower())
+        self.assertNotIn("session_id", serialized)
+        self.assertNotIn("report_id", serialized)
+        self.assertNotIn("created_at", serialized)
+        self.assertNotIn("updated_at", serialized)
+
+    def test_uses_stored_care_guideline_snapshot(self):
+        report = self.create_normal_report()
+        stored_snapshot = deepcopy(report.care_guideline_snapshot)
+        changed_guideline = deepcopy(stored_snapshot)
+        changed_guideline["max_load_kg"] = 999
+        self.product_model.care_guideline = changed_guideline
+        self.product_model.save(update_fields=["care_guideline"])
+
+        context = build_history_ai_context(report)
+
+        self.assertEqual(
+            context["care_guideline_snapshot"]["max_load_kg"],
+            stored_snapshot["max_load_kg"],
+        )
+        self.assertNotEqual(
+            context["care_guideline_snapshot"]["max_load_kg"],
+            changed_guideline["max_load_kg"],
+        )
+
+    def test_context_is_json_serializable(self):
+        report = self.create_available_comparison_report()
+        report.metrics["load"]["average_kg"] = Decimal("4.25")
+
+        context = build_history_ai_context(report)
+
+        json.dumps(context, allow_nan=False)
+        JSONRenderer().render(context)
+
+    def test_context_does_not_mutate_report_snapshots(self):
+        report = self.create_available_comparison_report()
+        original_metrics = deepcopy(report.metrics)
+        original_comparison = deepcopy(report.comparison)
+        original_guideline = deepcopy(report.care_guideline_snapshot)
+        original_active_rules = deepcopy(report.active_rules)
+        original_unavailable_rules = deepcopy(report.unavailable_rules)
+
+        context = build_history_ai_context(report)
+        context["metrics"]["load"]["average_kg"] = 999
+        context["comparison"]["metrics"]["load"]["average_kg"]["current"] = 999
+        context["care_guideline_snapshot"]["max_load_kg"] = 999
+        context["active_rules"].append("TAMPERED")
+
+        self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(report.comparison, original_comparison)
+        self.assertEqual(report.care_guideline_snapshot, original_guideline)
+        self.assertEqual(report.active_rules, original_active_rules)
+        self.assertEqual(report.unavailable_rules, original_unavailable_rules)
+
+
+class HistoryAIContentContractTests(TestCase):
+    def valid_payload(self):
+        return {
+            "weekly_summary": "주간 요약",
+            "care_comment": "관리 설명",
+            "pattern_insight": "패턴 설명",
+            "priority_actions": ["첫 번째 행동", "두 번째 행동"],
+        }
+
+    def test_validates_and_normalizes_valid_payload(self):
+        payload = self.valid_payload()
+        payload["weekly_summary"] = "  주간 요약  "
+
+        result = validate_history_ai_content(payload)
+
+        self.assertEqual(result["weekly_summary"], "주간 요약")
+        self.assertIsNot(result, payload)
+        self.assertIsNot(result["priority_actions"], payload["priority_actions"])
+        self.assertEqual(HISTORY_AI_CONTENT_SCHEMA["required"], list(result))
+        self.assertFalse(HISTORY_AI_CONTENT_SCHEMA["additionalProperties"])
+        self.assertEqual(
+            HISTORY_AI_CONTENT_SCHEMA["properties"]["priority_actions"]["maxItems"],
+            2,
+        )
+
+    def test_rejects_missing_or_empty_weekly_summary(self):
+        missing = self.valid_payload()
+        missing.pop("weekly_summary")
+        empty = self.valid_payload()
+        empty["weekly_summary"] = "   "
+
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(missing)
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(empty)
+
+    def test_rejects_invalid_care_comment(self):
+        payload = self.valid_payload()
+        payload["care_comment"] = 123
+
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(payload)
+
+    def test_rejects_invalid_pattern_insight(self):
+        payload = self.valid_payload()
+        payload["pattern_insight"] = False
+
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(payload)
+
+    def test_rejects_non_list_priority_actions(self):
+        payload = self.valid_payload()
+        payload["priority_actions"] = "행동"
+
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(payload)
+
+    def test_rejects_invalid_priority_action_item(self):
+        for invalid_item in ("", "   ", 1, True, None):
+            with self.subTest(invalid_item=invalid_item):
+                payload = self.valid_payload()
+                payload["priority_actions"] = [invalid_item]
+                with self.assertRaises(HistoryAIContentValidationError):
+                    validate_history_ai_content(payload)
+
+    def test_rejects_more_than_two_priority_actions(self):
+        payload = self.valid_payload()
+        payload["priority_actions"] = ["하나", "둘", "셋"]
+
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(payload)
+
+    def test_rejects_unexpected_field_in_sync_with_schema(self):
+        payload = self.valid_payload()
+        payload["daily_comments"] = []
+
+        with self.assertRaises(HistoryAIContentValidationError):
+            validate_history_ai_content(payload)
+        self.assertFalse(HISTORY_AI_CONTENT_SCHEMA["additionalProperties"])
+
+
+class HistoryAIFallbackTests(HistoryAITestCase):
+    def test_builds_normal_fallback(self):
+        report = self.create_normal_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(
+            fallback["weekly_summary"],
+            "최근 7일 동안 확인 가능한 지표에서는 관리 기준을 초과한 기록이 없었어요.",
+        )
+        self.assertEqual(fallback["priority_actions"], [])
+
+    def test_builds_warning_fallback_from_stored_metric(self):
+        report = self.create_warning_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertIn("하중 기준을 초과한 날이 7일", fallback["weekly_summary"])
+        self.assertNotIn("6.000000", fallback["weekly_summary"])
+
+    def test_uses_active_rule_care_action(self):
+        report = self.create_warning_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(
+            fallback["care_comment"],
+            "HIGH_LOAD care HIGH_LOAD reason",
+        )
+        self.assertEqual(fallback["priority_actions"], ["HIGH_LOAD step"])
+
+    def test_limits_priority_actions_to_two(self):
+        session = self.create_session()
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(len(fallback["priority_actions"]), 2)
+        self.assertEqual(
+            fallback["priority_actions"],
+            ["HIGH_LOAD step", "HIGH_TEMPERATURE step"],
+        )
+
+    def test_deduplicates_priority_actions_in_active_rule_order(self):
+        session = self.create_session()
+        self.add_readings(session)
+        report, _created = analyze_history_session(session)
+        report.care_guideline_snapshot["care_actions"]["HIGH_LOAD"]["steps"] = [
+            "same step",
+            "same step",
+        ]
+        report.care_guideline_snapshot["care_actions"]["HIGH_TEMPERATURE"][
+            "steps"
+        ] = ["same step", "second step"]
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(
+            fallback["priority_actions"],
+            ["same step", "second step"],
+        )
+
+    def test_builds_available_comparison_pattern(self):
+        report = self.create_available_comparison_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(
+            fallback["pattern_insight"],
+            "평균 하중이 이전 7일보다 50.00% 늘었어요. "
+            "과부하 발생일이 이전 7일보다 7일 늘었어요.",
+        )
+
+    def test_builds_no_previous_period_pattern(self):
+        report = self.create_normal_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(
+            fallback["pattern_insight"],
+            "이전 기록이 아직 충분하지 않아 이번 기간의 변화 비교를 제공하지 않았어요.",
+        )
+
+    def test_zero_to_positive_change_does_not_invent_one_hundred_percent(self):
+        report = self.create_normal_report()
+        self.set_comparison_metrics(
+            report,
+            {
+                "load": {
+                    "average_kg": {
+                        "current": 5,
+                        "previous": 0,
+                        "change": 5,
+                        "change_percent": None,
+                    }
+                }
+            },
+        )
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertIn("5.00kg", fallback["pattern_insight"])
+        self.assertNotIn("100%", fallback["pattern_insight"])
+
+    def test_formats_bias_and_deformation_changes_as_percentage_points(self):
+        report = self.create_normal_report()
+        self.set_comparison_metrics(
+            report,
+            {
+                "load_bias": {
+                    "max_absolute_percent": {
+                        "current": 15,
+                        "previous": 10,
+                        "change": 5,
+                        "change_percent": 50,
+                    }
+                },
+                "deformation": {
+                    "latest_percent": {
+                        "current": 4,
+                        "previous": 2,
+                        "change": 2,
+                        "change_percent": 100,
+                    }
+                },
+            },
+        )
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertIn("5.00%p", fallback["pattern_insight"])
+        self.assertIn("2.00%p", fallback["pattern_insight"])
+        self.assertNotIn("50.00% ", fallback["pattern_insight"])
+        self.assertNotIn("100.00%", fallback["pattern_insight"])
+
+    def test_fallback_passes_complete_output_contract_validation(self):
+        report = self.create_warning_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertEqual(validate_history_ai_content(fallback), fallback)
+
+    def test_fallback_is_json_serializable(self):
+        report = self.create_available_comparison_report()
+
+        fallback = build_history_ai_fallback(report)
+
+        json.dumps(fallback, allow_nan=False)
+        JSONRenderer().render(fallback)
+
+    def test_fallback_does_not_mutate_report_snapshots(self):
+        report = self.create_available_comparison_report()
+        original_metrics = deepcopy(report.metrics)
+        original_comparison = deepcopy(report.comparison)
+        original_guideline = deepcopy(report.care_guideline_snapshot)
+        original_active_rules = deepcopy(report.active_rules)
+
+        build_history_ai_fallback(report)
+
+        self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(report.comparison, original_comparison)
+        self.assertEqual(report.care_guideline_snapshot, original_guideline)
+        self.assertEqual(report.active_rules, original_active_rules)
