@@ -20,6 +20,7 @@ class AnalysisReport(models.Model):
     unavailable_rules = models.JSONField(default=list)
     care_guideline_snapshot = models.JSONField()
     comparison = models.JSONField(default=dict)
+    ai_result = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

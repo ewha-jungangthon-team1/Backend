@@ -18,9 +18,11 @@ from simulation.models import SimulationScenario
 from .ai import (
     HISTORY_AI_CONTENT_SCHEMA,
     HistoryAIContentValidationError,
+    HistoryAIResultValidationError,
     build_history_ai_context,
     build_history_ai_fallback,
     validate_history_ai_content,
+    validate_history_ai_result,
 )
 from .comparisons import (
     ComparisonUnavailableReason,
@@ -1556,6 +1558,100 @@ class AnalysisReportComparisonFieldTests(HistoryAnalysisTestCase):
         self.assertEqual(report.comparison, comparison)
 
 
+class AnalysisReportAIResultFieldTests(HistoryAnalysisTestCase):
+    def build_content(self):
+        return {
+            "weekly_summary": "주간 요약",
+            "care_comment": "관리 설명",
+            "pattern_insight": "패턴 설명",
+            "priority_actions": ["첫 번째 행동", "두 번째 행동"],
+        }
+
+    def build_result(self, *, status):
+        if status == "SUCCESS":
+            metadata = {
+                "provider": "openai",
+                "model": "test-model",
+                "fallback_reason": None,
+            }
+        else:
+            metadata = {
+                "provider": "deterministic",
+                "model": None,
+                "fallback_reason": "OPENAI_TIMEOUT",
+            }
+        return {
+            "schema_version": 1,
+            "status": status,
+            "generated_at": "2026-08-12T20:30:00+09:00",
+            **metadata,
+            "content": self.build_content(),
+        }
+
+    def test_defaults_ai_result_to_empty_dict(self):
+        session = self.create_session()
+        report = AnalysisReport.objects.create(
+            session=session,
+            metrics={},
+            severity=Severity.NORMAL.value,
+            care_guideline_snapshot={},
+        )
+
+        self.assertEqual(report.ai_result, {})
+
+    def test_analysis_service_uses_ai_result_model_default(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+
+        report, _created = analyze_history_session(session)
+
+        self.assertEqual(report.ai_result, {})
+
+    def test_persists_success_result_json_round_trip(self):
+        report = self.create_report()
+        expected_result = self.build_result(status="SUCCESS")
+
+        report.ai_result = expected_result
+        report.save(update_fields=["ai_result"])
+        report.refresh_from_db()
+
+        self.assertEqual(report.ai_result, expected_result)
+
+    def test_persists_fallback_result_json_round_trip(self):
+        report = self.create_report()
+        expected_result = self.build_result(status="FALLBACK")
+
+        report.ai_result = expected_result
+        report.save(update_fields=["ai_result"])
+        report.refresh_from_db()
+
+        self.assertEqual(report.ai_result, expected_result)
+
+    def test_preserves_nested_content_and_priority_actions(self):
+        report = self.create_report()
+        expected_result = self.build_result(status="SUCCESS")
+        report.ai_result = expected_result
+        report.save(update_fields=["ai_result"])
+
+        report.refresh_from_db()
+
+        self.assertEqual(report.ai_result["content"], expected_result["content"])
+        self.assertEqual(
+            report.ai_result["content"]["priority_actions"],
+            ["첫 번째 행동", "두 번째 행동"],
+        )
+
+    def create_report(self):
+        session = self.create_session()
+        return AnalysisReport.objects.create(
+            session=session,
+            metrics={},
+            severity=Severity.NORMAL.value,
+            care_guideline_snapshot={},
+            ai_result={},
+        )
+
+
 class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
     def test_serializes_analysis_report_fields_and_values(self):
         scenario = self.create_scenario()
@@ -2436,6 +2532,195 @@ class HistoryAIContentContractTests(TestCase):
         with self.assertRaises(HistoryAIContentValidationError):
             validate_history_ai_content(payload)
         self.assertFalse(HISTORY_AI_CONTENT_SCHEMA["additionalProperties"])
+
+
+class HistoryAIResultContractTests(TestCase):
+    def valid_content(self):
+        return {
+            "weekly_summary": "주간 요약",
+            "care_comment": "관리 설명",
+            "pattern_insight": "패턴 설명",
+            "priority_actions": ["첫 번째 행동", "두 번째 행동"],
+        }
+
+    def valid_success(self):
+        return {
+            "schema_version": 1,
+            "status": "SUCCESS",
+            "generated_at": "2026-08-12T20:30:00+09:00",
+            "provider": "openai",
+            "model": "test-model",
+            "fallback_reason": None,
+            "content": self.valid_content(),
+        }
+
+    def valid_fallback(self):
+        return {
+            "schema_version": 1,
+            "status": "FALLBACK",
+            "generated_at": "2026-08-12T20:30:00+09:00",
+            "provider": "deterministic",
+            "model": None,
+            "fallback_reason": "OPENAI_TIMEOUT",
+            "content": self.valid_content(),
+        }
+
+    def test_validates_success_result(self):
+        payload = self.valid_success()
+
+        result = validate_history_ai_result(payload)
+
+        self.assertEqual(result, payload)
+        self.assertIsNot(result, payload)
+        self.assertIsNot(result["content"], payload["content"])
+
+    def test_validates_fallback_result(self):
+        payload = self.valid_fallback()
+
+        result = validate_history_ai_result(payload)
+
+        self.assertEqual(result, payload)
+
+    def test_rejects_non_mapping_and_empty_uninitialized_state(self):
+        for payload in (None, [], "result", {}):
+            with self.subTest(payload=payload):
+                with self.assertRaises(HistoryAIResultValidationError):
+                    validate_history_ai_result(payload)
+
+    def test_rejects_missing_field(self):
+        payload = self.valid_success()
+        payload.pop("content")
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_unexpected_field(self):
+        payload = self.valid_success()
+        payload["request_id"] = "internal"
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_unsupported_schema_version(self):
+        for schema_version in (0, 2, 1.0, "1"):
+            with self.subTest(schema_version=schema_version):
+                payload = self.valid_success()
+                payload["schema_version"] = schema_version
+                with self.assertRaises(HistoryAIResultValidationError):
+                    validate_history_ai_result(payload)
+
+    def test_rejects_boolean_schema_version(self):
+        payload = self.valid_success()
+        payload["schema_version"] = True
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_invalid_status(self):
+        for status in ("PENDING", None, []):
+            with self.subTest(status=status):
+                payload = self.valid_success()
+                payload["status"] = status
+                with self.assertRaises(HistoryAIResultValidationError):
+                    validate_history_ai_result(payload)
+
+    def test_rejects_invalid_generated_at(self):
+        for generated_at in (None, "", "not-a-datetime", 123):
+            with self.subTest(generated_at=generated_at):
+                payload = self.valid_success()
+                payload["generated_at"] = generated_at
+                with self.assertRaises(HistoryAIResultValidationError):
+                    validate_history_ai_result(payload)
+
+    def test_rejects_naive_generated_at(self):
+        payload = self.valid_success()
+        payload["generated_at"] = "2026-08-12T20:30:00"
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_success_provider_mismatch(self):
+        payload = self.valid_success()
+        payload["provider"] = "deterministic"
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_success_missing_model(self):
+        for model in (None, "", "   "):
+            with self.subTest(model=model):
+                payload = self.valid_success()
+                payload["model"] = model
+                with self.assertRaises(HistoryAIResultValidationError):
+                    validate_history_ai_result(payload)
+
+    def test_rejects_success_fallback_reason(self):
+        payload = self.valid_success()
+        payload["fallback_reason"] = "OPENAI_TIMEOUT"
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_fallback_provider_mismatch(self):
+        payload = self.valid_fallback()
+        payload["provider"] = "openai"
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_fallback_model(self):
+        payload = self.valid_fallback()
+        payload["model"] = "test-model"
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            validate_history_ai_result(payload)
+
+    def test_rejects_fallback_missing_or_empty_reason(self):
+        for fallback_reason in (None, "", "   "):
+            with self.subTest(fallback_reason=fallback_reason):
+                payload = self.valid_fallback()
+                payload["fallback_reason"] = fallback_reason
+                with self.assertRaises(HistoryAIResultValidationError):
+                    validate_history_ai_result(payload)
+
+    def test_wraps_invalid_content_as_result_validation_error(self):
+        payload = self.valid_success()
+        payload["content"]["weekly_summary"] = ""
+
+        with self.assertRaises(HistoryAIResultValidationError) as raised:
+            validate_history_ai_result(payload)
+
+        self.assertIsInstance(
+            raised.exception.__cause__,
+            HistoryAIContentValidationError,
+        )
+
+    def test_returns_normalized_content_and_metadata_strings(self):
+        payload = self.valid_fallback()
+        payload["generated_at"] = "  2026-08-12T20:30:00+09:00  "
+        payload["fallback_reason"] = "  OPENAI_TIMEOUT  "
+        payload["content"]["weekly_summary"] = "  주간 요약  "
+
+        result = validate_history_ai_result(payload)
+
+        self.assertEqual(result["generated_at"], "2026-08-12T20:30:00+09:00")
+        self.assertEqual(result["fallback_reason"], "OPENAI_TIMEOUT")
+        self.assertEqual(result["content"]["weekly_summary"], "주간 요약")
+
+    def test_does_not_mutate_input(self):
+        payload = self.valid_success()
+        original_payload = deepcopy(payload)
+
+        result = validate_history_ai_result(payload)
+        result["content"]["priority_actions"].append("변경")
+
+        self.assertEqual(payload, original_payload)
+
+    def test_validated_result_is_json_serializable(self):
+        result = validate_history_ai_result(self.valid_success())
+
+        json.dumps(result, allow_nan=False)
+        JSONRenderer().render(result)
 
 
 class HistoryAIFallbackTests(HistoryAITestCase):
