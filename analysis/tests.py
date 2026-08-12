@@ -2,11 +2,11 @@ import json
 from copy import deepcopy
 from datetime import datetime, timedelta
 from decimal import Decimal
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.urls import reverse
 from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
@@ -15,15 +15,29 @@ from measurements.models import MeasurementSession, SensorReading
 from products.models import Bag, ProductModel
 from simulation.models import SimulationScenario
 
+import httpx2
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+
 from .ai import (
     HISTORY_AI_CONTENT_SCHEMA,
+    HistoryAIGenerationError,
+    HistoryAIGenerationReason,
     HistoryAIContentValidationError,
     HistoryAIResultValidationError,
     build_history_ai_context,
     build_history_ai_fallback,
+    get_openai_client,
+    get_openai_model,
     validate_history_ai_content,
     validate_history_ai_result,
 )
+from .ai.client import (
+    DEFAULT_OPENAI_MODEL,
+    DEFAULT_OPENAI_TIMEOUT_SECONDS,
+    OPENAI_MAX_RETRIES,
+    get_openai_timeout_seconds,
+)
+from .ai.errors import raise_history_ai_generation_error
 from .comparisons import (
     ComparisonUnavailableReason,
     build_history_metric_comparison,
@@ -2887,3 +2901,130 @@ class HistoryAIFallbackTests(HistoryAITestCase):
         self.assertEqual(report.comparison, original_comparison)
         self.assertEqual(report.care_guideline_snapshot, original_guideline)
         self.assertEqual(report.active_rules, original_active_rules)
+
+
+class HistoryAIClientInfrastructureTests(TestCase):
+    def build_request(self):
+        return httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    def assert_mapped_error(self, sdk_error, expected_reason):
+        with self.assertRaises(HistoryAIGenerationError) as raised:
+            raise_history_ai_generation_error(sdk_error)
+
+        self.assertEqual(raised.exception.reason, expected_reason)
+        self.assertIs(raised.exception.__cause__, sdk_error)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_module_import_does_not_construct_client_without_key(self):
+        import importlib
+        import analysis.ai.client as client_module
+
+        with patch("openai.OpenAI") as openai_constructor:
+            importlib.reload(client_module)
+            openai_constructor.assert_not_called()
+        importlib.reload(client_module)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_missing_key_raises_not_configured_at_client_creation(self):
+        with self.assertRaises(HistoryAIGenerationError) as raised:
+            get_openai_client()
+
+        self.assertEqual(
+            raised.exception.reason,
+            HistoryAIGenerationReason.OPENAI_NOT_CONFIGURED.value,
+        )
+
+    @override_settings(OPENAI_MODEL=None)
+    def test_openai_model_default(self):
+        self.assertEqual(DEFAULT_OPENAI_MODEL, "gpt-5.6-terra")
+        self.assertEqual(get_openai_model(), "gpt-5.6-terra")
+
+    @override_settings(OPENAI_MODEL="  configured-model  ")
+    def test_openai_model_override(self):
+        self.assertEqual(get_openai_model(), "configured-model")
+
+    @override_settings(OPENAI_TIMEOUT_SECONDS=None)
+    def test_timeout_default(self):
+        self.assertEqual(DEFAULT_OPENAI_TIMEOUT_SECONDS, 12.0)
+        self.assertEqual(get_openai_timeout_seconds(), 12.0)
+
+    @override_settings(OPENAI_TIMEOUT_SECONDS="4.5")
+    def test_timeout_override(self):
+        self.assertEqual(get_openai_timeout_seconds(), 4.5)
+
+    def test_client_module_uses_sync_openai_only(self):
+        import analysis.ai.client as client_module
+        from openai import OpenAI
+
+        self.assertIs(client_module.OpenAI, OpenAI)
+        self.assertFalse(hasattr(client_module, "AsyncOpenAI"))
+
+    @override_settings(
+        OPENAI_API_KEY="dummy-test-key",
+        OPENAI_TIMEOUT_SECONDS=12,
+    )
+    def test_client_construction_applies_timeout_and_retry(self):
+        client_sentinel = object()
+
+        with patch(
+            "analysis.ai.client.OpenAI",
+            return_value=client_sentinel,
+        ) as openai_constructor:
+            result = get_openai_client()
+
+        self.assertIs(result, client_sentinel)
+        openai_constructor.assert_called_once_with(
+            api_key="dummy-test-key",
+            timeout=12.0,
+            max_retries=OPENAI_MAX_RETRIES,
+        )
+        self.assertEqual(OPENAI_MAX_RETRIES, 1)
+
+    def test_generation_error_exposes_reason_without_secret(self):
+        error = HistoryAIGenerationError(
+            HistoryAIGenerationReason.OPENAI_NOT_CONFIGURED
+        )
+
+        self.assertEqual(error.reason, "OPENAI_NOT_CONFIGURED")
+        self.assertEqual(str(error), "OPENAI_NOT_CONFIGURED")
+        self.assertNotIn("key", str(error).lower())
+
+    def test_maps_sdk_timeout(self):
+        error = APITimeoutError(request=self.build_request())
+
+        self.assert_mapped_error(error, "OPENAI_TIMEOUT")
+
+    def test_maps_sdk_rate_limit(self):
+        request = self.build_request()
+        response = httpx2.Response(429, request=request)
+        error = RateLimitError("rate limited", response=response, body=None)
+
+        self.assert_mapped_error(error, "OPENAI_RATE_LIMIT")
+
+    def test_maps_sdk_connection_error(self):
+        error = APIConnectionError(request=self.build_request())
+
+        self.assert_mapped_error(error, "OPENAI_CONNECTION_ERROR")
+
+    def test_maps_generic_sdk_api_status_error(self):
+        request = self.build_request()
+        response = httpx2.Response(500, request=request)
+        error = APIStatusError("provider error", response=response, body=None)
+
+        self.assert_mapped_error(error, "OPENAI_API_ERROR")
+
+    def test_mapping_preserves_original_exception_as_cause(self):
+        error = APITimeoutError(request=self.build_request())
+
+        with self.assertRaises(HistoryAIGenerationError) as raised:
+            raise_history_ai_generation_error(error)
+
+        self.assertIs(raised.exception.__cause__, error)
+
+    def test_unknown_programming_exception_is_not_mapped(self):
+        error = ValueError("programming error")
+
+        with self.assertRaises(ValueError) as raised:
+            raise_history_ai_generation_error(error)
+
+        self.assertIs(raised.exception, error)
