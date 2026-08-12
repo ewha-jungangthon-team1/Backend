@@ -2,6 +2,7 @@ from enum import Enum
 
 from openai import (
     APIConnectionError,
+    APIResponseValidationError,
     APIStatusError,
     APITimeoutError,
     RateLimitError,
@@ -14,6 +15,10 @@ class HistoryAIGenerationReason(str, Enum):
     OPENAI_RATE_LIMIT = "OPENAI_RATE_LIMIT"
     OPENAI_CONNECTION_ERROR = "OPENAI_CONNECTION_ERROR"
     OPENAI_API_ERROR = "OPENAI_API_ERROR"
+    OPENAI_REFUSAL = "OPENAI_REFUSAL"
+    OPENAI_INCOMPLETE = "OPENAI_INCOMPLETE"
+    EMPTY_AI_RESPONSE = "EMPTY_AI_RESPONSE"
+    INVALID_AI_RESPONSE = "INVALID_AI_RESPONSE"
 
 
 class HistoryAIGenerationError(Exception):
@@ -31,6 +36,8 @@ def raise_history_ai_generation_error(error):
         reason = HistoryAIGenerationReason.OPENAI_RATE_LIMIT
     elif isinstance(error, APIConnectionError):
         reason = HistoryAIGenerationReason.OPENAI_CONNECTION_ERROR
+    elif isinstance(error, APIResponseValidationError):
+        reason = HistoryAIGenerationReason.OPENAI_API_ERROR
     elif isinstance(error, APIStatusError):
         reason = HistoryAIGenerationReason.OPENAI_API_ERROR
     else:

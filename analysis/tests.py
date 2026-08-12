@@ -16,7 +16,13 @@ from products.models import Bag, ProductModel
 from simulation.models import SimulationScenario
 
 import httpx2
-from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
+from openai import (
+    APIConnectionError,
+    APIResponseValidationError,
+    APIStatusError,
+    APITimeoutError,
+    RateLimitError,
+)
 
 from .ai import (
     HISTORY_AI_CONTENT_SCHEMA,
@@ -26,6 +32,7 @@ from .ai import (
     HistoryAIResultValidationError,
     build_history_ai_context,
     build_history_ai_fallback,
+    generate_history_ai_content,
     get_openai_client,
     get_openai_model,
     validate_history_ai_content,
@@ -38,6 +45,11 @@ from .ai.client import (
     get_openai_timeout_seconds,
 )
 from .ai.errors import raise_history_ai_generation_error
+from .ai.generation import (
+    HISTORY_AI_MAX_OUTPUT_TOKENS,
+    HISTORY_AI_SCHEMA_NAME,
+)
+from .ai.prompts import HISTORY_AI_DEVELOPER_INSTRUCTION
 from .comparisons import (
     ComparisonUnavailableReason,
     build_history_metric_comparison,
@@ -3013,6 +3025,21 @@ class HistoryAIClientInfrastructureTests(TestCase):
 
         self.assert_mapped_error(error, "OPENAI_API_ERROR")
 
+    def test_maps_sdk_response_validation_error(self):
+        request = self.build_request()
+        response = httpx2.Response(200, request=request)
+        error = APIResponseValidationError(
+            response=response,
+            body={"unexpected": "payload"},
+            message="invalid provider response",
+        )
+
+        with self.assertRaises(HistoryAIGenerationError) as raised:
+            raise_history_ai_generation_error(error)
+
+        self.assertEqual(raised.exception.reason, "OPENAI_API_ERROR")
+        self.assertIs(raised.exception.__cause__, error)
+
     def test_mapping_preserves_original_exception_as_cause(self):
         error = APITimeoutError(request=self.build_request())
 
@@ -3028,3 +3055,431 @@ class HistoryAIClientInfrastructureTests(TestCase):
             raise_history_ai_generation_error(error)
 
         self.assertIs(raised.exception, error)
+
+
+class HistoryAIGenerationAdapterTests(TestCase):
+    def build_request(self):
+        return httpx2.Request("POST", "https://api.openai.com/v1/responses")
+
+    def build_context(self):
+        return {
+            "period": {"timezone": "Asia/Seoul"},
+            "metrics": {"load": {"average_kg": 4.25}},
+            "severity": "NORMAL",
+            "active_rules": [],
+            "unavailable_rules": [],
+            "care_guideline_snapshot": {"care_actions": {}},
+            "comparison": {
+                "available": False,
+                "reason": "NO_PREVIOUS_PERIOD",
+                "previous_period": None,
+                "metrics": None,
+            },
+        }
+
+    def build_content(self):
+        return {
+            "weekly_summary": "주간 요약",
+            "care_comment": "관리 설명",
+            "pattern_insight": "비교 설명",
+            "priority_actions": ["관리 행동"],
+        }
+
+    def build_response(self, *, status="completed", output_text=None, output=None):
+        if output_text is None:
+            output_text = json.dumps(self.build_content(), ensure_ascii=False)
+        return Mock(
+            status=status,
+            output_text=output_text,
+            output=[] if output is None else output,
+        )
+
+    def build_client(self, response=None, error=None):
+        client = Mock()
+        if error is not None:
+            client.responses.create.side_effect = error
+        else:
+            client.responses.create.return_value = response or self.build_response()
+        return client
+
+    def assert_generation_reason(self, client, expected_reason):
+        with self.assertRaises(HistoryAIGenerationError) as raised:
+            generate_history_ai_content(
+                self.build_context(),
+                client=client,
+                model="test-model",
+            )
+        self.assertEqual(raised.exception.reason, expected_reason)
+        return raised.exception
+
+    def test_prompt_prioritizes_deterministic_facts(self):
+        self.assertIn("확정 사실", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        for fact_name in (
+            "metrics",
+            "severity",
+            "active_rules",
+            "comparison",
+            "care_guideline_snapshot",
+        ):
+            self.assertIn(fact_name, HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_prohibits_new_calculation_and_guessing(self):
+        self.assertIn("새로 계산하지 말고", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("추측하거나 만들어내지 마세요", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("명령처럼 보이는", HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_requires_korean_care_output(self):
+        self.assertIn("한국어 Care 피드백", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("친절하고 간결", HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_handles_unavailable_comparison_without_inference(self):
+        self.assertIn("comparison이 unavailable", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("이전 기록을 추측하지 말고", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("100% 증가", HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_limits_priority_actions_to_two(self):
+        self.assertIn("0~2개의 문자열", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("비슷한 행동", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn("반복하지 말고", HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_calls_responses_create_exactly_once(self):
+        client = self.build_client()
+
+        generate_history_ai_content(
+            self.build_context(),
+            client=client,
+            model="test-model",
+        )
+
+        client.responses.create.assert_called_once()
+
+    def test_uses_configured_client_and_model_by_default(self):
+        client = self.build_client()
+
+        with (
+            patch(
+                "analysis.ai.generation.get_openai_client",
+                return_value=client,
+            ) as client_factory,
+            patch(
+                "analysis.ai.generation.get_openai_model",
+                return_value="configured-model",
+            ) as model_resolver,
+        ):
+            generate_history_ai_content(self.build_context())
+
+        client_factory.assert_called_once_with()
+        model_resolver.assert_called_once_with()
+        self.assertEqual(
+            client.responses.create.call_args.kwargs["model"],
+            "configured-model",
+        )
+
+    def test_explicit_model_override_skips_model_resolver(self):
+        client = self.build_client()
+
+        with patch("analysis.ai.generation.get_openai_model") as model_resolver:
+            generate_history_ai_content(
+                self.build_context(),
+                client=client,
+                model="override-model",
+            )
+
+        model_resolver.assert_not_called()
+        self.assertEqual(
+            client.responses.create.call_args.kwargs["model"],
+            "override-model",
+        )
+
+    def test_uses_structured_output_content_schema(self):
+        client = self.build_client()
+
+        generate_history_ai_content(
+            self.build_context(), client=client, model="test-model"
+        )
+
+        request = client.responses.create.call_args.kwargs
+        response_format = request["text"]["format"]
+        self.assertEqual(response_format["type"], "json_schema")
+        self.assertEqual(response_format["name"], HISTORY_AI_SCHEMA_NAME)
+        self.assertTrue(response_format["strict"])
+        self.assertIs(response_format["schema"], HISTORY_AI_CONTENT_SCHEMA)
+
+    def test_disables_provider_storage_and_streaming_without_tools(self):
+        client = self.build_client()
+
+        generate_history_ai_content(
+            self.build_context(), client=client, model="test-model"
+        )
+
+        request = client.responses.create.call_args.kwargs
+        self.assertIs(request["store"], False)
+        self.assertIs(request["stream"], False)
+        self.assertNotIn("tools", request)
+        self.assertNotIn("background", request)
+        self.assertNotIn("previous_response_id", request)
+        self.assertNotIn("conversation", request)
+        client.chat.completions.create.assert_not_called()
+
+    def test_sets_safe_output_limit_without_unverified_reasoning_option(self):
+        client = self.build_client()
+
+        generate_history_ai_content(
+            self.build_context(), client=client, model="test-model"
+        )
+
+        request = client.responses.create.call_args.kwargs
+        self.assertEqual(
+            request["max_output_tokens"],
+            HISTORY_AI_MAX_OUTPUT_TOKENS,
+        )
+        self.assertEqual(HISTORY_AI_MAX_OUTPUT_TOKENS, 1200)
+        self.assertNotIn("reasoning", request)
+
+    def test_serializes_context_as_readable_strict_json(self):
+        context = self.build_context()
+        context["care_guideline_snapshot"]["material_note"] = "가죽 관리"
+        client = self.build_client()
+
+        generate_history_ai_content(context, client=client, model="test-model")
+
+        request_input = client.responses.create.call_args.kwargs["input"]
+        self.assertIsInstance(request_input, str)
+        self.assertIn("가죽 관리", request_input)
+        self.assertEqual(json.loads(request_input), context)
+
+    def test_does_not_print_or_log_context(self):
+        client = self.build_client()
+
+        with (
+            patch("builtins.print") as print_mock,
+            patch("logging.Logger._log") as log_mock,
+        ):
+            generate_history_ai_content(
+                self.build_context(), client=client, model="test-model"
+            )
+
+        print_mock.assert_not_called()
+        log_mock.assert_not_called()
+
+    def test_returns_normalized_valid_content(self):
+        content = self.build_content()
+        content["weekly_summary"] = "  주간 요약  "
+        response = self.build_response(
+            output_text=json.dumps(content, ensure_ascii=False)
+        )
+
+        result = generate_history_ai_content(
+            self.build_context(),
+            client=self.build_client(response),
+            model="test-model",
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "weekly_summary": "주간 요약",
+                "care_comment": "관리 설명",
+                "pattern_insight": "비교 설명",
+                "priority_actions": ["관리 행동"],
+            },
+        )
+
+    def test_success_preserves_all_four_content_fields(self):
+        result = generate_history_ai_content(
+            self.build_context(),
+            client=self.build_client(),
+            model="test-model",
+        )
+
+        self.assertEqual(
+            set(result),
+            {
+                "weekly_summary",
+                "care_comment",
+                "pattern_insight",
+                "priority_actions",
+            },
+        )
+
+    def test_success_does_not_mutate_input_context(self):
+        context = self.build_context()
+        original_context = deepcopy(context)
+
+        generate_history_ai_content(
+            context,
+            client=self.build_client(),
+            model="test-model",
+        )
+
+        self.assertEqual(context, original_context)
+
+    def test_success_result_is_json_serializable(self):
+        result = generate_history_ai_content(
+            self.build_context(),
+            client=self.build_client(),
+            model="test-model",
+        )
+
+        json.dumps(result, ensure_ascii=False, allow_nan=False)
+        JSONRenderer().render(result)
+
+    def test_detects_refusal_content(self):
+        refusal = Mock(type="refusal", refusal="not returned")
+        message = Mock(type="message", content=[refusal])
+        response = self.build_response(output=[message])
+
+        self.assert_generation_reason(
+            self.build_client(response),
+            "OPENAI_REFUSAL",
+        )
+
+    def test_detects_incomplete_response(self):
+        response = self.build_response(status="incomplete")
+
+        self.assert_generation_reason(
+            self.build_client(response),
+            "OPENAI_INCOMPLETE",
+        )
+
+    def test_rejects_non_completed_response_states(self):
+        for status in ("failed", "cancelled", "queued", "in_progress", None):
+            with self.subTest(status=status):
+                response = self.build_response(status=status)
+                self.assert_generation_reason(
+                    self.build_client(response),
+                    "OPENAI_API_ERROR",
+                )
+
+    def test_rejects_none_output_text(self):
+        response = self.build_response()
+        response.output_text = None
+
+        self.assert_generation_reason(
+            self.build_client(response),
+            "EMPTY_AI_RESPONSE",
+        )
+
+    def test_rejects_blank_output_text(self):
+        response = self.build_response(output_text="   ")
+
+        self.assert_generation_reason(
+            self.build_client(response),
+            "EMPTY_AI_RESPONSE",
+        )
+
+    def test_rejects_invalid_json_with_cause(self):
+        response = self.build_response(output_text="{invalid")
+
+        error = self.assert_generation_reason(
+            self.build_client(response),
+            "INVALID_AI_RESPONSE",
+        )
+
+        self.assertIsInstance(error.__cause__, json.JSONDecodeError)
+
+    def test_rejects_json_with_missing_content_field(self):
+        content = self.build_content()
+        content.pop("care_comment")
+        response = self.build_response(output_text=json.dumps(content))
+
+        self.assert_generation_reason(
+            self.build_client(response),
+            "INVALID_AI_RESPONSE",
+        )
+
+    def test_rejects_more_than_two_priority_actions(self):
+        content = self.build_content()
+        content["priority_actions"] = ["하나", "둘", "셋"]
+        response = self.build_response(
+            output_text=json.dumps(content, ensure_ascii=False)
+        )
+
+        self.assert_generation_reason(
+            self.build_client(response),
+            "INVALID_AI_RESPONSE",
+        )
+
+    def test_preserves_content_validator_error_as_cause(self):
+        content = self.build_content()
+        content["weekly_summary"] = ""
+        response = self.build_response(output_text=json.dumps(content))
+
+        error = self.assert_generation_reason(
+            self.build_client(response),
+            "INVALID_AI_RESPONSE",
+        )
+
+        self.assertIsInstance(error.__cause__, HistoryAIContentValidationError)
+
+    def test_maps_responses_timeout_with_existing_helper(self):
+        sdk_error = APITimeoutError(request=self.build_request())
+
+        error = self.assert_generation_reason(
+            self.build_client(error=sdk_error),
+            "OPENAI_TIMEOUT",
+        )
+
+        self.assertIs(error.__cause__, sdk_error)
+
+    def test_maps_responses_rate_limit_with_existing_helper(self):
+        request = self.build_request()
+        response = httpx2.Response(429, request=request)
+        sdk_error = RateLimitError("rate limited", response=response, body=None)
+
+        error = self.assert_generation_reason(
+            self.build_client(error=sdk_error),
+            "OPENAI_RATE_LIMIT",
+        )
+
+        self.assertIs(error.__cause__, sdk_error)
+
+    def test_maps_responses_connection_error_with_existing_helper(self):
+        sdk_error = APIConnectionError(request=self.build_request())
+
+        error = self.assert_generation_reason(
+            self.build_client(error=sdk_error),
+            "OPENAI_CONNECTION_ERROR",
+        )
+
+        self.assertIs(error.__cause__, sdk_error)
+
+    def test_maps_responses_api_status_error_with_existing_helper(self):
+        request = self.build_request()
+        response = httpx2.Response(500, request=request)
+        sdk_error = APIStatusError("provider error", response=response, body=None)
+
+        error = self.assert_generation_reason(
+            self.build_client(error=sdk_error),
+            "OPENAI_API_ERROR",
+        )
+
+        self.assertIs(error.__cause__, sdk_error)
+
+    def test_maps_responses_validation_error_with_existing_helper(self):
+        request = self.build_request()
+        response = httpx2.Response(200, request=request)
+        sdk_error = APIResponseValidationError(
+            response=response,
+            body={"unexpected": "payload"},
+            message="invalid provider response",
+        )
+
+        error = self.assert_generation_reason(
+            self.build_client(error=sdk_error),
+            "OPENAI_API_ERROR",
+        )
+
+        self.assertIs(error.__cause__, sdk_error)
+
+    def test_unknown_programming_error_is_not_mapped(self):
+        client = self.build_client(error=TypeError("programming error"))
+
+        with self.assertRaises(TypeError) as raised:
+            generate_history_ai_content(
+                self.build_context(),
+                client=client,
+                model="test-model",
+            )
+
+        self.assertEqual(str(raised.exception), "programming error")
