@@ -4,9 +4,10 @@ from rest_framework.response import Response
 
 from measurements.models import MeasurementSession
 
+from .ai import HistoryAIContentValidationError, HistoryAIResultValidationError
 from .models import AnalysisReport
 from .serializers import AnalysisReportSerializer
-from .services import analyze_history_session
+from .services import analyze_history_session_with_ai
 
 
 @api_view(["POST"])
@@ -23,7 +24,9 @@ def analyze_history_session_view(request, session_id):
         )
 
     try:
-        report, created = analyze_history_session(session)
+        report, created = analyze_history_session_with_ai(session)
+    except (HistoryAIContentValidationError, HistoryAIResultValidationError):
+        raise
     except ValueError as exc:
         return Response(
             {"detail": str(exc)},

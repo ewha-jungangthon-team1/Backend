@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
-from django.test import TestCase, override_settings
+from django.db import connection
+from django.test import TestCase, TransactionTestCase, override_settings
 from django.urls import reverse
 from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
@@ -60,7 +61,7 @@ from .metrics import build_history_daily_series, calculate_history_metrics
 from .models import AnalysisReport
 from .rules import evaluate_history_rules
 from .serializers import AnalysisReportSerializer
-from .services import analyze_history_session
+from .services import analyze_history_session, analyze_history_session_with_ai
 
 
 class HistoryAnalysisTestCase(TestCase):
@@ -162,6 +163,14 @@ class HistoryAnalysisTestCase(TestCase):
             sample_interval_seconds=86400,
             config={},
         )
+
+    def build_ai_content(self, marker="generated"):
+        return {
+            "weekly_summary": f"{marker} weekly summary",
+            "care_comment": f"{marker} care comment",
+            "pattern_insight": f"{marker} pattern insight",
+            "priority_actions": [f"{marker} action"],
+        }
 
 
 class HistoryMetricsTests(HistoryAnalysisTestCase):
@@ -1225,6 +1234,16 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
         self.add_uniform_readings(session)
 
         first_report, first_created = analyze_history_session(session)
+        first_report.ai_result = {
+            "schema_version": 1,
+            "status": "SUCCESS",
+            "generated_at": "2026-08-12T20:30:00+09:00",
+            "provider": "openai",
+            "model": "old-model",
+            "fallback_reason": None,
+            "content": self.build_ai_content("old"),
+        }
+        first_report.save(update_fields=["ai_result"])
 
         first_reading = session.readings.order_by("sequence").first()
         first_reading.strap_load = Decimal("6.00")
@@ -1257,6 +1276,7 @@ class HistoryAnalysisServiceTests(HistoryAnalysisTestCase):
             second_report.care_guideline_snapshot["note"],
             "updated guideline",
         )
+        self.assertEqual(second_report.ai_result, {})
 
     def test_care_guideline_snapshot_is_independent(self):
         session = self.create_session()
@@ -1699,6 +1719,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "metrics",
                 "chart_references",
                 "comparison",
+                "ai_result",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -1720,6 +1741,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
         )
         self.assertEqual(data["metrics"], report.metrics)
         self.assertEqual(data["comparison"], report.comparison)
+        self.assertEqual(data["ai_result"], report.ai_result)
         self.assertEqual(
             data["chart_references"],
             {
@@ -1790,6 +1812,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "metrics": {"tampered": True},
                 "chart_references": {"max_load_kg": 999},
                 "comparison": {"tampered": True},
+                "ai_result": {"tampered": True},
                 "severity": Severity.DANGER.value,
                 "active_rules": [RuleCode.HIGH_LOAD.value],
                 "unavailable_rules": [],
@@ -1802,11 +1825,18 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data, {})
         self.assertTrue(serializer.fields["comparison"].read_only)
+        self.assertTrue(serializer.fields["ai_result"].read_only)
 
 
 class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
     def setUp(self):
         self.client = APIClient()
+        generation_patch = patch(
+            "analysis.services.generate_history_ai_content",
+            return_value=self.build_ai_content(),
+        )
+        self.mock_generation = generation_patch.start()
+        self.addCleanup(generation_patch.stop)
 
     def get_url(self, session_id):
         return reverse(
@@ -1864,6 +1894,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "metrics",
                 "chart_references",
                 "comparison",
+                "ai_result",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -1887,6 +1918,13 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             },
         )
         self.assertEqual(response.data["comparison"], report.comparison)
+        self.assertEqual(response.data["ai_result"], report.ai_result)
+        self.assertEqual(response.data["ai_result"]["status"], "SUCCESS")
+        self.assertEqual(response.data["ai_result"]["provider"], "openai")
+        self.assertEqual(
+            response.data["ai_result"]["content"],
+            self.build_ai_content(),
+        )
         self.assertEqual(
             response.data["metrics"]["daily_series"],
             report.metrics["daily_series"],
@@ -1912,6 +1950,49 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             response.data["active_rules"], [RuleCode.HIGH_LOAD.value]
         )
         self.assertNotEqual(response.data["metrics"], {"tampered": True})
+
+    def test_returns_fallback_ai_result_for_generation_error(self):
+        session = self.create_session()
+        self.add_uniform_readings(session, strap_load="6.00")
+        self.mock_generation.side_effect = HistoryAIGenerationError(
+            "OPENAI_TIMEOUT"
+        )
+
+        response = self.client.post(self.get_url(session.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["created"])
+        self.assertEqual(response.data["ai_result"]["status"], "FALLBACK")
+        self.assertEqual(
+            response.data["ai_result"]["provider"],
+            "deterministic",
+        )
+        self.assertIsNone(response.data["ai_result"]["model"])
+        self.assertEqual(
+            response.data["ai_result"]["fallback_reason"],
+            "OPENAI_TIMEOUT",
+        )
+        self.assertEqual(
+            validate_history_ai_result(response.data["ai_result"]),
+            response.data["ai_result"],
+        )
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_missing_api_key_returns_fallback_report_without_network(self):
+        session = self.create_session()
+        self.add_uniform_readings(session)
+        self.mock_generation.side_effect = HistoryAIGenerationError(
+            "OPENAI_NOT_CONFIGURED"
+        )
+
+        response = self.client.post(self.get_url(session.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["ai_result"]["status"], "FALLBACK")
+        self.assertEqual(
+            response.data["ai_result"]["fallback_reason"],
+            "OPENAI_NOT_CONFIGURED",
+        )
 
     def test_returns_available_comparison_for_exact_previous_period(self):
         previous = self.create_session()
@@ -1992,6 +2073,9 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         session = self.create_session()
         self.add_uniform_readings(session)
         url = self.get_url(session.id)
+        content_a = self.build_ai_content("A")
+        content_b = self.build_ai_content("B")
+        self.mock_generation.side_effect = [content_a, content_b]
 
         first_response = self.client.post(url, {}, format="json")
         first_reading = session.readings.order_by("sequence").first()
@@ -2026,6 +2110,9 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             second_response.data["care_guideline_snapshot"]["max_load_kg"],
             8.0,
         )
+        self.assertEqual(first_response.data["ai_result"]["content"], content_a)
+        self.assertEqual(second_response.data["ai_result"]["content"], content_b)
+        self.assertEqual(self.mock_generation.call_count, 2)
 
     def test_returns_404_for_missing_session(self):
         response = self.client.post(self.get_url(999999))
@@ -2067,6 +2154,12 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
 class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
     def setUp(self):
         self.client = APIClient()
+        generation_patch = patch(
+            "analysis.services.generate_history_ai_content",
+            return_value=self.build_ai_content(),
+        )
+        self.mock_generation = generation_patch.start()
+        self.addCleanup(generation_patch.stop)
 
     def get_url(self, report_id):
         return reverse(
@@ -2099,6 +2192,7 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
                 "metrics",
                 "chart_references",
                 "comparison",
+                "ai_result",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -2123,6 +2217,8 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         )
         self.assertEqual(response.data["metrics"], report.metrics)
         self.assertEqual(response.data["comparison"], report.comparison)
+        self.assertEqual(response.data["ai_result"], report.ai_result)
+        self.mock_generation.assert_not_called()
         self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
         self.assertEqual(
             response.data["metrics"]["daily_series"],
@@ -2195,6 +2291,17 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         original_metrics = deepcopy(report.metrics)
         original_comparison = deepcopy(report.comparison)
         original_snapshot = deepcopy(report.care_guideline_snapshot)
+        report.ai_result = {
+            "schema_version": 1,
+            "status": "SUCCESS",
+            "generated_at": "2026-08-12T20:30:00+09:00",
+            "provider": "openai",
+            "model": "stored-model",
+            "fallback_reason": None,
+            "content": self.build_ai_content("stored"),
+        }
+        report.save(update_fields=["ai_result", "updated_at"])
+        original_ai_result = deepcopy(report.ai_result)
         original_updated_at = report.updated_at
         original_count = AnalysisReport.objects.count()
 
@@ -2207,9 +2314,11 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.product_model.save(update_fields=["care_guideline"])
 
         response = self.client.get(self.get_url(report.id))
+        second_response = self.client.get(self.get_url(report.id))
         report.refresh_from_db()
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(second_response.status_code, 200)
         self.assertEqual(AnalysisReport.objects.count(), original_count)
         self.assertEqual(report.updated_at, original_updated_at)
         self.assertEqual(report.metrics, original_metrics)
@@ -2228,6 +2337,10 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             4.0,
         )
         self.assertEqual(report.care_guideline_snapshot, original_snapshot)
+        self.assertEqual(report.ai_result, original_ai_result)
+        self.assertEqual(response.data["ai_result"], original_ai_result)
+        self.assertEqual(second_response.data["ai_result"], original_ai_result)
+        self.mock_generation.assert_not_called()
         self.assertEqual(
             response.data["chart_references"]["max_load_kg"],
             original_snapshot["max_load_kg"],
@@ -2320,6 +2433,236 @@ class HistoryAITestCase(HistoryAnalysisTestCase):
             },
             "metrics": metrics,
         }
+
+
+class HistoryAIOrchestrationServiceTests(HistoryAITestCase):
+    def create_session_with_readings(self, *, strap_load="4.00"):
+        session = self.create_session()
+        self.add_uniform_readings(session, strap_load=strap_load)
+        return session
+
+    @patch("analysis.services.get_openai_model", return_value="resolved-model")
+    @patch("analysis.services.generate_history_ai_content")
+    def test_saves_valid_success_snapshot(self, generation, model_resolver):
+        session = self.create_session_with_readings()
+        generated_content = self.build_ai_content("success")
+        generation.return_value = generated_content
+
+        report, created = analyze_history_session_with_ai(session)
+
+        self.assertTrue(created)
+        model_resolver.assert_called_once_with()
+        generation.assert_called_once()
+        self.assertEqual(generation.call_args.kwargs, {"model": "resolved-model"})
+        self.assertEqual(
+            generation.call_args.args[0],
+            build_history_ai_context(report),
+        )
+        self.assertEqual(report.ai_result["schema_version"], 1)
+        self.assertEqual(report.ai_result["status"], "SUCCESS")
+        self.assertEqual(report.ai_result["provider"], "openai")
+        self.assertEqual(report.ai_result["model"], "resolved-model")
+        self.assertIsNone(report.ai_result["fallback_reason"])
+        self.assertEqual(report.ai_result["content"], generated_content)
+        generated_at = datetime.fromisoformat(report.ai_result["generated_at"])
+        self.assertIsNotNone(generated_at.utcoffset())
+        self.assertEqual(
+            validate_history_ai_result(report.ai_result),
+            report.ai_result,
+        )
+        report.refresh_from_db()
+        self.assertEqual(report.ai_result["status"], "SUCCESS")
+
+    @patch("analysis.services.get_openai_model", return_value="resolved-model")
+    @patch("analysis.services.build_history_ai_fallback")
+    @patch("analysis.services.generate_history_ai_content")
+    def test_saves_valid_fallback_snapshot(
+        self,
+        generation,
+        fallback_builder,
+        _model_resolver,
+    ):
+        session = self.create_session_with_readings(strap_load="6.00")
+        fallback_content = self.build_ai_content("fallback")
+        fallback_builder.return_value = fallback_content
+        generation.side_effect = HistoryAIGenerationError("OPENAI_TIMEOUT")
+
+        report, created = analyze_history_session_with_ai(session)
+
+        self.assertTrue(created)
+        fallback_builder.assert_called_once_with(report)
+        self.assertEqual(report.ai_result["schema_version"], 1)
+        self.assertEqual(report.ai_result["status"], "FALLBACK")
+        self.assertEqual(report.ai_result["provider"], "deterministic")
+        self.assertIsNone(report.ai_result["model"])
+        self.assertEqual(report.ai_result["fallback_reason"], "OPENAI_TIMEOUT")
+        self.assertEqual(report.ai_result["content"], fallback_content)
+        self.assertEqual(
+            validate_history_ai_result(report.ai_result),
+            report.ai_result,
+        )
+
+    @patch("analysis.services.build_history_ai_fallback")
+    @patch("analysis.services.generate_history_ai_content")
+    def test_passes_through_representative_fallback_reasons(
+        self,
+        generation,
+        fallback_builder,
+    ):
+        fallback_builder.return_value = self.build_ai_content("fallback")
+
+        for reason in ("OPENAI_NOT_CONFIGURED", "INVALID_AI_RESPONSE"):
+            with self.subTest(reason=reason):
+                session = self.create_session_with_readings()
+                generation.side_effect = HistoryAIGenerationError(reason)
+
+                report, _created = analyze_history_session_with_ai(session)
+
+                self.assertEqual(report.ai_result["fallback_reason"], reason)
+
+    @override_settings(OPENAI_API_KEY="")
+    def test_missing_api_key_uses_real_not_configured_fallback_boundary(self):
+        session = self.create_session_with_readings()
+
+        report, created = analyze_history_session_with_ai(session)
+
+        self.assertTrue(created)
+        self.assertEqual(report.ai_result["status"], "FALLBACK")
+        self.assertEqual(
+            report.ai_result["fallback_reason"],
+            "OPENAI_NOT_CONFIGURED",
+        )
+
+    @patch("analysis.services.build_history_ai_fallback")
+    @patch("analysis.services.generate_history_ai_content")
+    def test_programming_error_propagates_and_leaves_empty_ai_result(
+        self,
+        generation,
+        fallback_builder,
+    ):
+        session = self.create_session_with_readings(strap_load="6.00")
+        generation.side_effect = TypeError("programming error")
+
+        with self.assertRaisesMessage(TypeError, "programming error"):
+            analyze_history_session_with_ai(session)
+
+        fallback_builder.assert_not_called()
+        report = AnalysisReport.objects.get(session=session)
+        self.assertEqual(report.metrics["load"]["max_kg"], 6.0)
+        self.assertEqual(report.ai_result, {})
+
+    @patch("analysis.services.validate_history_ai_result")
+    @patch("analysis.services.generate_history_ai_content")
+    def test_result_validation_error_propagates_and_leaves_empty_ai_result(
+        self,
+        generation,
+        result_validator,
+    ):
+        session = self.create_session_with_readings()
+        generation.return_value = self.build_ai_content("success")
+        result_validator.side_effect = HistoryAIResultValidationError(
+            "orchestration contract error"
+        )
+
+        with self.assertRaises(HistoryAIResultValidationError):
+            analyze_history_session_with_ai(session)
+
+        report = AnalysisReport.objects.get(session=session)
+        self.assertEqual(report.ai_result, {})
+
+    @patch("analysis.services.generate_history_ai_content")
+    def test_regeneration_replaces_old_ai_snapshot_and_preserves_created(
+        self,
+        generation,
+    ):
+        session = self.create_session_with_readings()
+        content_a = self.build_ai_content("A")
+        content_b = self.build_ai_content("B")
+        generation.side_effect = [content_a, content_b]
+
+        first_report, first_created = analyze_history_session_with_ai(session)
+        first_snapshot = deepcopy(first_report.ai_result)
+        second_report, second_created = analyze_history_session_with_ai(session)
+
+        self.assertTrue(first_created)
+        self.assertFalse(second_created)
+        self.assertEqual(first_report.pk, second_report.pk)
+        self.assertEqual(generation.call_count, 2)
+        self.assertEqual(first_snapshot["content"], content_a)
+        self.assertEqual(second_report.ai_result["content"], content_b)
+        self.assertNotEqual(second_report.ai_result["content"], content_a)
+
+
+class HistoryAITransactionBoundaryTests(TransactionTestCase):
+    def setUp(self):
+        owner = get_user_model().objects.create_user(username="transaction-owner")
+        product_model = ProductModel.objects.create(
+            brand="Test Brand",
+            model_name="Transaction Bag",
+            material="Leather",
+            care_guideline={
+                "avoid_moisture": True,
+                "max_load_kg": 5.5,
+                "recommended_temp_range_c": [0, 35],
+                "max_humidity_percent": 70,
+                "max_abs_load_bias": 0.30,
+                "max_body_deformation_ratio": 0.03,
+                "care_actions": {},
+            },
+        )
+        bag = Bag.objects.create(
+            product_model=product_model,
+            owner=owner,
+            nfc_uid="TRANSACTION-NFC",
+        )
+        started_at = datetime(2026, 7, 28, 9, tzinfo=ZoneInfo("Asia/Seoul"))
+        self.session = MeasurementSession.objects.create(
+            bag=bag,
+            purpose=MeasurementSession.Purpose.HISTORY,
+            seed=12345,
+            started_at=started_at,
+            ended_at=started_at + timedelta(days=7),
+            status=MeasurementSession.Status.COMPLETED,
+        )
+        for sequence in range(7):
+            SensorReading.objects.create(
+                session=self.session,
+                strap_load=Decimal("4.00"),
+                humidity=Decimal("50.00"),
+                moisture_detected=False,
+                temperature=Decimal("25.00"),
+                measured_at=started_at + timedelta(days=sequence),
+                load_bias=Decimal("0.1000"),
+                body_deformation_ratio=Decimal("0.0100"),
+                sequence=sequence,
+            )
+
+    def test_generation_runs_after_deterministic_commit_outside_atomic_block(self):
+        observed = {}
+
+        def generation(context, *, model):
+            stored_report = AnalysisReport.objects.get(session=self.session)
+            observed["in_atomic_block"] = connection.in_atomic_block
+            observed["stored_ai_result"] = stored_report.ai_result
+            observed["stored_metrics"] = stored_report.metrics
+            return {
+                "weekly_summary": "weekly summary",
+                "care_comment": "care comment",
+                "pattern_insight": "pattern insight",
+                "priority_actions": [],
+            }
+
+        with patch(
+            "analysis.services.generate_history_ai_content",
+            side_effect=generation,
+        ):
+            report, created = analyze_history_session_with_ai(self.session)
+
+        self.assertTrue(created)
+        self.assertFalse(observed["in_atomic_block"])
+        self.assertEqual(observed["stored_ai_result"], {})
+        self.assertEqual(observed["stored_metrics"], report.metrics)
+        self.assertEqual(report.ai_result["status"], "SUCCESS")
 
 
 class HistoryAIContextTests(HistoryAITestCase):

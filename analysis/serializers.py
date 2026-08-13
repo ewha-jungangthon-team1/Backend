@@ -42,6 +42,7 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
             "metrics",
             "chart_references",
             "comparison",
+            "ai_result",
             "severity",
             "active_rules",
             "unavailable_rules",
