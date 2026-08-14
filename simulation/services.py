@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.timezone import now as get_current_time
 
 from .models import SimulationScenario
 from measurements.models import MeasurementSession, SensorReading
@@ -294,6 +295,8 @@ def get_latest_reading(session):
     화면이 부드럽게 움직이도록, 방금 값과 그 직전 값 사이를 구간 진행률만큼
     보간해서 '보여주기'만 한다 (DB에 새로 저장하지 않음).
     """
+    observed_at = get_current_time()
+
     if session.purpose == MeasurementSession.Purpose.HISTORY:
         latest = session.readings.order_by("-sequence").first()
         local_ratio = 0.0
@@ -329,6 +332,8 @@ def get_latest_reading(session):
     return {
         "session_id": session.id,
         "sequence": latest.sequence,
+        "measured_at": latest.measured_at,
+        "observed_at": observed_at,
         "scenario_type": session.scenario.scenario_type,
         "progress_ratio": round(progress_ratio, 3),
         "is_finished": progress_ratio >= 1.0,
