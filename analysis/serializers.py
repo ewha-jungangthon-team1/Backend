@@ -1,9 +1,16 @@
+from copy import deepcopy
 from decimal import Decimal
 
 from django.utils import timezone
+from django.utils.timezone import localdate as get_local_date
 from rest_framework import serializers
 
 from .models import AnalysisReport
+from .presentation import (
+    build_current_history_display_period,
+    build_previous_history_display_period,
+    project_history_daily_series,
+)
 
 
 def _as_json_number(value):
@@ -30,7 +37,10 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
         allow_null=True,
     )
     period = serializers.SerializerMethodField()
+    display_period = serializers.SerializerMethodField()
+    metrics = serializers.SerializerMethodField()
     chart_references = serializers.SerializerMethodField()
+    comparison = serializers.SerializerMethodField()
 
     class Meta:
         model = AnalysisReport
@@ -39,6 +49,7 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
             "session_id",
             "scenario_code",
             "period",
+            "display_period",
             "metrics",
             "chart_references",
             "comparison",
@@ -58,6 +69,39 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
             "ended_at": _as_project_timezone_iso(obj.session.ended_at),
             "timezone": timezone.get_default_timezone_name(),
         }
+
+    def _get_display_reference_date(self):
+        if not hasattr(self, "_display_reference_date"):
+            self._display_reference_date = get_local_date()
+        return self._display_reference_date
+
+    def get_display_period(self, obj):
+        return build_current_history_display_period(
+            self._get_display_reference_date()
+        )
+
+    def get_metrics(self, obj):
+        metrics = deepcopy(obj.metrics)
+        if not isinstance(metrics, dict) or "daily_series" not in metrics:
+            return metrics
+
+        metrics["daily_series"] = project_history_daily_series(
+            metrics["daily_series"],
+            self._get_display_reference_date(),
+        )
+        return metrics
+
+    def get_comparison(self, obj):
+        comparison = deepcopy(obj.comparison)
+        if not isinstance(comparison, dict):
+            return comparison
+
+        comparison["display_previous_period"] = (
+            build_previous_history_display_period(
+                self._get_display_reference_date()
+            )
+        )
+        return comparison
 
     def get_chart_references(self, obj):
         snapshot = obj.care_guideline_snapshot

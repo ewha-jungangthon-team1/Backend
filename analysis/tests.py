@@ -1,6 +1,6 @@
 import json
 from copy import deepcopy
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import Mock, patch
 from zoneinfo import ZoneInfo
@@ -59,9 +59,30 @@ from .comparisons import (
 from .constants import RuleCode, Severity
 from .metrics import build_history_daily_series, calculate_history_metrics
 from .models import AnalysisReport
+from .presentation import (
+    build_current_history_display_period,
+    build_previous_history_display_period,
+    project_history_daily_series,
+)
 from .rules import evaluate_history_rules
 from .serializers import AnalysisReportSerializer
 from .services import analyze_history_session, analyze_history_session_with_ai
+
+
+def _source_metrics(response_metrics):
+    metrics = deepcopy(response_metrics)
+    if isinstance(metrics, dict) and isinstance(metrics.get("daily_series"), list):
+        for item in metrics["daily_series"]:
+            if isinstance(item, dict):
+                item.pop("display_date", None)
+    return metrics
+
+
+def _source_comparison(response_comparison):
+    comparison = deepcopy(response_comparison)
+    if isinstance(comparison, dict):
+        comparison.pop("display_previous_period", None)
+    return comparison
 
 
 class HistoryAnalysisTestCase(TestCase):
@@ -342,6 +363,94 @@ class HistoryMetricsTests(HistoryAnalysisTestCase):
 
         with self.assertRaisesMessage(ValueError, "Only COMPLETED sessions"):
             calculate_history_metrics(session)
+
+
+class HistoryDisplayPresentationTests(TestCase):
+    reference_date = date(2026, 8, 14)
+
+    def test_builds_non_overlapping_current_and_previous_seven_day_periods(self):
+        current = build_current_history_display_period(self.reference_date)
+        previous = build_previous_history_display_period(self.reference_date)
+
+        self.assertEqual(
+            current,
+            {
+                "start_date": "2026-08-07",
+                "end_date": "2026-08-13",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(
+            previous,
+            {
+                "start_date": "2026-07-31",
+                "end_date": "2026-08-06",
+                "timezone": "Asia/Seoul",
+            },
+        )
+
+        current_start = date.fromisoformat(current["start_date"])
+        current_end = date.fromisoformat(current["end_date"])
+        previous_start = date.fromisoformat(previous["start_date"])
+        previous_end = date.fromisoformat(previous["end_date"])
+        self.assertEqual((current_end - current_start).days + 1, 7)
+        self.assertEqual((previous_end - previous_start).days + 1, 7)
+        self.assertLess(previous_end, current_start)
+        self.assertEqual(current_end + timedelta(days=1), self.reference_date)
+        self.assertEqual(previous_end + timedelta(days=1), current_start)
+
+    def test_projects_seven_items_without_mutating_source(self):
+        source = [{"date": f"source-{index}"} for index in range(7)]
+        original = deepcopy(source)
+
+        projected = project_history_daily_series(source, self.reference_date)
+
+        self.assertEqual(source, original)
+        self.assertEqual(
+            [item["display_date"] for item in projected],
+            [
+                "2026-08-07",
+                "2026-08-08",
+                "2026-08-09",
+                "2026-08-10",
+                "2026-08-11",
+                "2026-08-12",
+                "2026-08-13",
+            ],
+        )
+        self.assertEqual(
+            [item["date"] for item in projected],
+            [item["date"] for item in source],
+        )
+
+    def test_does_not_invent_dates_for_malformed_series(self):
+        malformed_series = (
+            [],
+            [{"date": f"source-{index}"} for index in range(6)],
+            [{"date": f"source-{index}"} for index in range(8)],
+            [{"date": f"source-{index}"} for index in range(6)] + ["invalid"],
+        )
+
+        for source in malformed_series:
+            with self.subTest(item_count=len(source)):
+                original = deepcopy(source)
+                projected = project_history_daily_series(
+                    source,
+                    self.reference_date,
+                )
+
+                self.assertEqual(source, original)
+                for item in projected:
+                    if isinstance(item, dict):
+                        self.assertIsNone(item["display_date"])
+
+    def test_preserves_non_list_daily_series(self):
+        for source in (None, {}, "legacy"):
+            with self.subTest(source=source):
+                self.assertEqual(
+                    project_history_daily_series(source, self.reference_date),
+                    source,
+                )
 
 
 class HistoryDailySeriesTests(HistoryAnalysisTestCase):
@@ -1699,13 +1808,19 @@ class AnalysisReportAIResultFieldTests(HistoryAnalysisTestCase):
 
 
 class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
-    def test_serializes_analysis_report_fields_and_values(self):
+    @patch(
+        "analysis.serializers.get_local_date",
+        return_value=date(2026, 8, 14),
+    )
+    def test_serializes_analysis_report_fields_and_values(self, _localdate):
         scenario = self.create_scenario()
         session = self.create_session()
         session.scenario = scenario
         session.save(update_fields=["scenario"])
         self.add_readings(session)
         report, _created = analyze_history_session(session)
+        original_metrics = deepcopy(report.metrics)
+        original_comparison = deepcopy(report.comparison)
 
         data = AnalysisReportSerializer(report).data
 
@@ -1716,6 +1831,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "session_id",
                 "scenario_code",
                 "period",
+                "display_period",
                 "metrics",
                 "chart_references",
                 "comparison",
@@ -1739,8 +1855,41 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "timezone": "Asia/Seoul",
             },
         )
-        self.assertEqual(data["metrics"], report.metrics)
-        self.assertEqual(data["comparison"], report.comparison)
+        self.assertEqual(
+            data["display_period"],
+            {
+                "start_date": "2026-08-07",
+                "end_date": "2026-08-13",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(_source_metrics(data["metrics"]), report.metrics)
+        self.assertEqual(
+            [item["display_date"] for item in data["metrics"]["daily_series"]],
+            [
+                "2026-08-07",
+                "2026-08-08",
+                "2026-08-09",
+                "2026-08-10",
+                "2026-08-11",
+                "2026-08-12",
+                "2026-08-13",
+            ],
+        )
+        self.assertEqual(
+            _source_comparison(data["comparison"]),
+            report.comparison,
+        )
+        self.assertEqual(
+            data["comparison"]["display_previous_period"],
+            {
+                "start_date": "2026-07-31",
+                "end_date": "2026-08-06",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(report.comparison, original_comparison)
         self.assertEqual(data["ai_result"], report.ai_result)
         self.assertEqual(
             data["chart_references"],
@@ -1759,6 +1908,66 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
             report.care_guideline_snapshot,
         )
         JSONRenderer().render(data)
+        _localdate.assert_called_once_with()
+
+    @patch(
+        "analysis.serializers.get_local_date",
+        return_value=date(2026, 8, 14),
+    )
+    def test_handles_legacy_and_malformed_snapshots_without_inventing_dates(
+        self,
+        _localdate,
+    ):
+        report = AnalysisReport.objects.create(
+            session=self.create_session(),
+            metrics={},
+            comparison={
+                "available": False,
+                "previous_period": None,
+            },
+            severity=Severity.NORMAL.value,
+            care_guideline_snapshot={},
+        )
+
+        data = AnalysisReportSerializer(report).data
+
+        self.assertEqual(data["metrics"], {})
+        self.assertEqual(
+            data["comparison"]["display_previous_period"],
+            {
+                "start_date": "2026-07-31",
+                "end_date": "2026-08-06",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertFalse(data["comparison"]["available"])
+
+        for daily_series in (
+            [{"date": f"source-{index}"} for index in range(6)],
+            [{"date": f"source-{index}"} for index in range(8)],
+        ):
+            with self.subTest(item_count=len(daily_series)):
+                report.metrics = {"daily_series": daily_series}
+                original_metrics = deepcopy(report.metrics)
+                projected = AnalysisReportSerializer(report).data["metrics"]
+
+                self.assertEqual(report.metrics, original_metrics)
+                self.assertEqual(
+                    [item["date"] for item in projected["daily_series"]],
+                    [item["date"] for item in daily_series],
+                )
+                self.assertTrue(
+                    all(
+                        item["display_date"] is None
+                        for item in projected["daily_series"]
+                    )
+                )
+
+        report.metrics = {"daily_series": "legacy"}
+        report.comparison = "legacy"
+        data = AnalysisReportSerializer(report).data
+        self.assertEqual(data["metrics"], {"daily_series": "legacy"})
+        self.assertEqual(data["comparison"], "legacy")
 
     def test_serializes_null_scenario_code(self):
         session = self.create_session()
@@ -1844,7 +2053,11 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             kwargs={"session_id": session_id},
         )
 
-    def test_analyzes_normal_history_without_request_body(self):
+    @patch(
+        "analysis.serializers.get_local_date",
+        return_value=date(2026, 8, 14),
+    )
+    def test_analyzes_normal_history_without_request_body(self, _localdate):
         session = self.create_session()
         self.add_uniform_readings(session)
 
@@ -1864,6 +2077,14 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             },
         )
         self.assertEqual(
+            response.data["display_period"],
+            {
+                "start_date": "2026-08-07",
+                "end_date": "2026-08-13",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(
             response.data["chart_references"],
             {
                 "max_load_kg": 5.5,
@@ -1877,6 +2098,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             response.data["metrics"]["daily_series"][0],
             {
                 "date": "2026-07-28",
+                "display_date": "2026-08-07",
                 "load_kg": 4.0,
                 "deformation_ratio": 0.01,
                 "deformation_percent": 1.0,
@@ -1891,6 +2113,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "session_id",
                 "scenario_code",
                 "period",
+                "display_period",
                 "metrics",
                 "chart_references",
                 "comparison",
@@ -1908,7 +2131,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         )
         report = AnalysisReport.objects.get(session=session)
         self.assertEqual(
-            response.data["comparison"],
+            _source_comparison(response.data["comparison"]),
             {
                 "available": False,
                 "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
@@ -1917,7 +2140,18 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "metrics": None,
             },
         )
-        self.assertEqual(response.data["comparison"], report.comparison)
+        self.assertEqual(
+            _source_comparison(response.data["comparison"]),
+            report.comparison,
+        )
+        self.assertEqual(
+            response.data["comparison"]["display_previous_period"],
+            {
+                "start_date": "2026-07-31",
+                "end_date": "2026-08-06",
+                "timezone": "Asia/Seoul",
+            },
+        )
         self.assertEqual(response.data["ai_result"], report.ai_result)
         self.assertEqual(response.data["ai_result"]["status"], "SUCCESS")
         self.assertEqual(response.data["ai_result"]["provider"], "openai")
@@ -1926,7 +2160,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             self.build_ai_content(),
         )
         self.assertEqual(
-            response.data["metrics"]["daily_series"],
+            _source_metrics(response.data["metrics"])["daily_series"],
             report.metrics["daily_series"],
         )
 
@@ -2059,7 +2293,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
         self.assertEqual(first_response.data["id"], second_response.data["id"])
         self.assertTrue(first_response.data["comparison"]["available"])
         self.assertEqual(
-            second_response.data["comparison"],
+            _source_comparison(second_response.data["comparison"]),
             {
                 "available": False,
                 "reason": ComparisonUnavailableReason.NO_PREVIOUS_PERIOD.value,
@@ -2176,7 +2410,11 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         report, _created = analyze_history_session(session)
         return session, report
 
-    def test_retrieves_stored_report(self):
+    @patch(
+        "analysis.serializers.get_local_date",
+        return_value=date(2026, 8, 14),
+    )
+    def test_retrieves_stored_report(self, _localdate):
         session, report = self.create_report()
 
         response = self.client.get(self.get_url(report.id))
@@ -2189,6 +2427,7 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
                 "session_id",
                 "scenario_code",
                 "period",
+                "display_period",
                 "metrics",
                 "chart_references",
                 "comparison",
@@ -2215,14 +2454,40 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
                 "timezone": "Asia/Seoul",
             },
         )
-        self.assertEqual(response.data["metrics"], report.metrics)
-        self.assertEqual(response.data["comparison"], report.comparison)
+        self.assertEqual(
+            response.data["display_period"],
+            {
+                "start_date": "2026-08-07",
+                "end_date": "2026-08-13",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(_source_metrics(response.data["metrics"]), report.metrics)
+        self.assertEqual(
+            _source_comparison(response.data["comparison"]),
+            report.comparison,
+        )
         self.assertEqual(response.data["ai_result"], report.ai_result)
         self.mock_generation.assert_not_called()
         self.assertEqual(len(response.data["metrics"]["daily_series"]), 7)
         self.assertEqual(
-            response.data["metrics"]["daily_series"],
+            _source_metrics(response.data["metrics"])["daily_series"],
             report.metrics["daily_series"],
+        )
+        self.assertEqual(
+            [
+                item["display_date"]
+                for item in response.data["metrics"]["daily_series"]
+            ],
+            [
+                "2026-08-07",
+                "2026-08-08",
+                "2026-08-09",
+                "2026-08-10",
+                "2026-08-11",
+                "2026-08-12",
+                "2026-08-13",
+            ],
         )
         self.assertEqual(response.data["severity"], report.severity)
         self.assertEqual(response.data["active_rules"], report.active_rules)
@@ -2243,7 +2508,14 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             },
         )
 
-    def test_get_matches_post_period_references_and_daily_series(self):
+    @patch(
+        "analysis.serializers.get_local_date",
+        return_value=date(2026, 8, 14),
+    )
+    def test_get_matches_post_period_references_and_daily_series(
+        self,
+        _localdate,
+    ):
         session = self.create_session()
         session.scenario = self.create_scenario()
         session.save(update_fields=["scenario"])
@@ -2260,6 +2532,10 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(post_response.status_code, 200)
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.data["period"], post_response.data["period"])
+        self.assertEqual(
+            get_response.data["display_period"],
+            post_response.data["display_period"],
+        )
         self.assertEqual(
             get_response.data["chart_references"],
             post_response.data["chart_references"],
@@ -2323,13 +2599,16 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(report.updated_at, original_updated_at)
         self.assertEqual(report.metrics, original_metrics)
         self.assertEqual(report.comparison, original_comparison)
-        self.assertEqual(response.data["comparison"], original_comparison)
+        self.assertEqual(
+            _source_comparison(response.data["comparison"]),
+            original_comparison,
+        )
         self.assertEqual(
             report.metrics["daily_series"],
             original_metrics["daily_series"],
         )
         self.assertEqual(
-            response.data["metrics"]["daily_series"],
+            _source_metrics(response.data["metrics"])["daily_series"],
             original_metrics["daily_series"],
         )
         self.assertEqual(
@@ -2345,12 +2624,23 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             response.data["chart_references"]["max_load_kg"],
             original_snapshot["max_load_kg"],
         )
-        self.assertEqual(response.data["metrics"], original_metrics)
+        self.assertEqual(_source_metrics(response.data["metrics"]), original_metrics)
+        self.assertEqual(
+            response.data["display_period"],
+            second_response.data["display_period"],
+        )
         self.assertEqual(
             response.data["care_guideline_snapshot"], original_snapshot
         )
 
-    def test_retrieves_legacy_empty_comparison_without_normalization(self):
+    @patch(
+        "analysis.serializers.get_local_date",
+        return_value=date(2026, 8, 14),
+    )
+    def test_retrieves_legacy_empty_comparison_without_normalization(
+        self,
+        _localdate,
+    ):
         session = self.create_session()
         report = AnalysisReport.objects.create(
             session=session,
@@ -2362,7 +2652,16 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         response = self.client.get(self.get_url(report.pk))
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["comparison"], {})
+        self.assertEqual(
+            response.data["comparison"],
+            {
+                "display_previous_period": {
+                    "start_date": "2026-07-31",
+                    "end_date": "2026-08-06",
+                    "timezone": "Asia/Seoul",
+                }
+            },
+        )
 
     def test_retrieves_report_with_null_scenario(self):
         _session, report = self.create_report(with_scenario=False)
