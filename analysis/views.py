@@ -1,3 +1,4 @@
+from django.utils.timezone import now as get_current_time
 from rest_framework import status as http_status
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
@@ -47,6 +48,34 @@ def analysis_report_detail_view(request, report_id):
     except AnalysisReport.DoesNotExist:
         return Response(
             {"detail": "존재하지 않는 분석 리포트입니다."},
+            status=http_status.HTTP_404_NOT_FOUND,
+        )
+
+    serializer = AnalysisReportSerializer(report)
+    return Response(serializer.data, status=http_status.HTTP_200_OK)
+
+
+@api_view(["GET"])
+def latest_analysis_report_for_bag_view(request, public_token):
+    report = (
+        AnalysisReport.objects.select_related("session__scenario")
+        .filter(
+            session__bag__public_token=public_token,
+            session__purpose=MeasurementSession.Purpose.HISTORY,
+            session__status=MeasurementSession.Status.COMPLETED,
+            session__ended_at__isnull=False,
+            session__ended_at__lte=get_current_time(),
+        )
+        .order_by(
+            "-session__ended_at",
+            "-session__started_at",
+            "-id",
+        )
+        .first()
+    )
+    if report is None:
+        return Response(
+            {"detail": "No eligible analysis report was found."},
             status=http_status.HTTP_404_NOT_FOUND,
         )
 

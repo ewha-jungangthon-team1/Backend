@@ -1,4 +1,5 @@
 import json
+import uuid
 from copy import deepcopy
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -67,6 +68,9 @@ from .presentation import (
 from .rules import evaluate_history_rules
 from .serializers import AnalysisReportSerializer
 from .services import analyze_history_session, analyze_history_session_with_ai
+
+
+_DEFAULT_ENDED_AT = object()
 
 
 def _source_metrics(response_metrics):
@@ -2670,6 +2674,314 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.data["scenario_code"])
+
+
+class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.product_model_b = ProductModel.objects.create(
+            brand="Test Brand B",
+            model_name="Test Bag B",
+            material="Canvas",
+            care_guideline=deepcopy(cls.product_model.care_guideline),
+        )
+        cls.bag_b = Bag.objects.create(
+            product_model=cls.product_model_b,
+            owner=cls.bag.owner,
+            nfc_uid="ANALYSIS-TEST-NFC-B",
+        )
+        cls.fixed_now = datetime(
+            2026,
+            8,
+            14,
+            12,
+            tzinfo=ZoneInfo("Asia/Seoul"),
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        now_patch = patch(
+            "analysis.views.get_current_time",
+            return_value=self.fixed_now,
+        )
+        display_date_patch = patch(
+            "analysis.serializers.get_local_date",
+            return_value=date(2026, 8, 14),
+        )
+        self.mock_now = now_patch.start()
+        self.mock_display_date = display_date_patch.start()
+        self.addCleanup(now_patch.stop)
+        self.addCleanup(display_date_patch.stop)
+
+    def get_url(self, bag=None):
+        return reverse(
+            "bag-latest-analysis-report",
+            kwargs={"public_token": (bag or self.bag).public_token},
+        )
+
+    def create_report(
+        self,
+        *,
+        bag=None,
+        started_at=None,
+        ended_at=_DEFAULT_ENDED_AT,
+        purpose=MeasurementSession.Purpose.HISTORY,
+        status=MeasurementSession.Status.COMPLETED,
+        scenario=None,
+    ):
+        bag = bag or self.bag
+        started_at = started_at or self.fixed_now - timedelta(days=9)
+        if ended_at is _DEFAULT_ENDED_AT:
+            ended_at = started_at + timedelta(days=7)
+        session = MeasurementSession.objects.create(
+            bag=bag,
+            scenario=scenario,
+            purpose=purpose,
+            seed=12345,
+            started_at=started_at,
+            ended_at=ended_at,
+            status=status,
+        )
+        daily_series = [
+            {
+                "date": f"2026-07-{index + 1:02d}",
+                "load_kg": float(index + 1),
+                "deformation_ratio": 0.01,
+                "deformation_percent": 1.0,
+                "moisture_detected": False,
+            }
+            for index in range(7)
+        ]
+        report = AnalysisReport.objects.create(
+            session=session,
+            metrics={"daily_series": daily_series, "marker": session.pk},
+            severity=Severity.NORMAL.value,
+            active_rules=[],
+            unavailable_rules=[],
+            care_guideline_snapshot={"max_load_kg": 5.5},
+            comparison={
+                "available": True,
+                "reason": None,
+                "previous_session_id": 999,
+                "previous_period": {
+                    "started_at": "2026-07-01T09:00:00+09:00",
+                    "ended_at": "2026-07-08T09:00:00+09:00",
+                    "timezone": "Asia/Seoul",
+                },
+                "metrics": {},
+            },
+            ai_result={"status": "SUCCESS", "marker": session.pk},
+        )
+        return session, report
+
+    def test_scopes_latest_report_to_each_bag(self):
+        _session_a, report_a = self.create_report(
+            bag=self.bag,
+            ended_at=self.fixed_now - timedelta(days=3),
+        )
+        _session_b, report_b = self.create_report(
+            bag=self.bag_b,
+            ended_at=self.fixed_now - timedelta(days=1),
+        )
+
+        response_a = self.client.get(self.get_url(self.bag))
+        response_b = self.client.get(self.get_url(self.bag_b))
+
+        self.assertEqual(response_a.status_code, 200)
+        self.assertEqual(response_b.status_code, 200)
+        self.assertEqual(response_a.data["id"], report_a.pk)
+        self.assertEqual(response_b.data["id"], report_b.pk)
+        self.assertNotEqual(response_a.data["id"], report_b.pk)
+
+    def test_orders_by_session_end_instead_of_report_creation_or_id(self):
+        _newer_session, newer_period_report = self.create_report(
+            ended_at=self.fixed_now - timedelta(days=1),
+        )
+        _older_session, later_created_report = self.create_report(
+            ended_at=self.fixed_now - timedelta(days=5),
+        )
+
+        response = self.client.get(self.get_url())
+
+        self.assertLess(newer_period_report.pk, later_created_report.pk)
+        self.assertLess(
+            newer_period_report.created_at,
+            later_created_report.created_at,
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], newer_period_report.pk)
+
+    def test_uses_started_at_then_report_id_as_deterministic_tie_breakers(self):
+        shared_end = self.fixed_now - timedelta(days=1)
+        _first_session, first = self.create_report(
+            started_at=self.fixed_now - timedelta(days=20),
+            ended_at=shared_end,
+        )
+        later_start = self.fixed_now - timedelta(days=10)
+        _second_session, second = self.create_report(
+            started_at=later_start,
+            ended_at=shared_end,
+        )
+
+        response = self.client.get(self.get_url())
+
+        self.assertEqual(response.data["id"], second.pk)
+
+        _third_session, third = self.create_report(
+            started_at=later_start,
+            ended_at=shared_end,
+        )
+        response = self.client.get(self.get_url())
+
+        self.assertGreater(third.pk, second.pk)
+        self.assertEqual(response.data["id"], third.pk)
+        self.assertNotEqual(response.data["id"], first.pk)
+
+    def test_excludes_ineligible_sessions_and_allows_null_scenario(self):
+        self.create_report(
+            purpose=MeasurementSession.Purpose.LIVE,
+            ended_at=self.fixed_now - timedelta(hours=1),
+        )
+        self.create_report(
+            status=MeasurementSession.Status.RUNNING,
+            ended_at=self.fixed_now - timedelta(hours=2),
+        )
+        self.create_report(ended_at=None)
+        self.create_report(ended_at=self.fixed_now + timedelta(days=1))
+        eligible_session, eligible_report = self.create_report(
+            ended_at=self.fixed_now - timedelta(days=2),
+            scenario=None,
+        )
+
+        response = self.client.get(self.get_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], eligible_report.pk)
+        self.assertEqual(response.data["session_id"], eligible_session.pk)
+        self.assertIsNone(response.data["scenario_code"])
+
+    def test_returns_404_for_nonexistent_or_malformed_token(self):
+        nonexistent_url = reverse(
+            "bag-latest-analysis-report",
+            kwargs={"public_token": uuid.uuid4()},
+        )
+
+        nonexistent_response = self.client.get(nonexistent_url)
+        malformed_response = self.client.get(
+            "/api/bags/not-a-uuid/reports/latest/"
+        )
+
+        self.assertEqual(nonexistent_response.status_code, 404)
+        self.assertIn("detail", nonexistent_response.data)
+        self.assertEqual(malformed_response.status_code, 404)
+
+    def test_returns_404_when_bag_has_no_eligible_report(self):
+        self.create_report(
+            bag=self.bag_b,
+            ended_at=self.fixed_now + timedelta(days=1),
+        )
+
+        response = self.client.get(self.get_url(self.bag_b))
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("detail", response.data)
+
+    def test_returns_existing_snapshot_with_h1_display_fields(self):
+        session, report = self.create_report()
+        source_metrics = deepcopy(report.metrics)
+        source_comparison = deepcopy(report.comparison)
+
+        response = self.client.get(self.get_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], report.pk)
+        self.assertEqual(response.data["session_id"], session.pk)
+        self.assertEqual(
+            response.data["period"],
+            {
+                "started_at": "2026-08-05T12:00:00+09:00",
+                "ended_at": "2026-08-12T12:00:00+09:00",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(
+            response.data["display_period"],
+            {
+                "start_date": "2026-08-07",
+                "end_date": "2026-08-13",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(_source_metrics(response.data["metrics"]), source_metrics)
+        self.assertEqual(
+            [item["display_date"] for item in response.data["metrics"]["daily_series"]],
+            [
+                "2026-08-07",
+                "2026-08-08",
+                "2026-08-09",
+                "2026-08-10",
+                "2026-08-11",
+                "2026-08-12",
+                "2026-08-13",
+            ],
+        )
+        self.assertEqual(
+            _source_comparison(response.data["comparison"]),
+            source_comparison,
+        )
+        self.assertEqual(
+            response.data["comparison"]["display_previous_period"],
+            {
+                "start_date": "2026-07-31",
+                "end_date": "2026-08-06",
+                "timezone": "Asia/Seoul",
+            },
+        )
+        self.assertEqual(response.data["ai_result"], report.ai_result)
+        JSONRenderer().render(response.data)
+
+    def test_get_does_not_reanalyze_call_ai_or_mutate_snapshot(self):
+        _session, report = self.create_report()
+        original_metrics = deepcopy(report.metrics)
+        original_comparison = deepcopy(report.comparison)
+        original_ai_result = deepcopy(report.ai_result)
+        original_updated_at = report.updated_at
+
+        with (
+            patch("analysis.views.analyze_history_session_with_ai") as analyze,
+            patch("analysis.services.find_previous_history_session") as selector,
+            patch("analysis.services.build_history_metric_comparison") as compare,
+            patch("analysis.services.generate_history_ai_content") as generation,
+        ):
+            response = self.client.get(self.get_url())
+
+        report.refresh_from_db()
+        self.assertEqual(response.status_code, 200)
+        analyze.assert_not_called()
+        selector.assert_not_called()
+        compare.assert_not_called()
+        generation.assert_not_called()
+        self.assertEqual(report.metrics, original_metrics)
+        self.assertEqual(report.comparison, original_comparison)
+        self.assertEqual(report.ai_result, original_ai_result)
+        self.assertEqual(report.updated_at, original_updated_at)
+
+    def test_non_get_methods_are_not_allowed(self):
+        self.create_report()
+
+        for method in ("post", "put", "patch", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(self.get_url(), data={})
+                self.assertEqual(response.status_code, 405)
+
+    def test_success_uses_single_report_query(self):
+        self.create_report()
+
+        with self.assertNumQueries(1):
+            response = self.client.get(self.get_url())
+
+        self.assertEqual(response.status_code, 200)
 
 
 class HistoryAITestCase(HistoryAnalysisTestCase):
