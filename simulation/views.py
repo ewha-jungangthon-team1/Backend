@@ -4,6 +4,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
+from analysis.live_rules import evaluate_live_session_rules
+from analysis.live_state import build_live_state
 from measurements.home import build_display_metrics, build_sensor_presentation_values
 from measurements.models import MeasurementSession
 from products.models import Bag
@@ -45,6 +47,18 @@ def latest_reading_view(request, session_id):
     if reading is None:
         return Response({"detail": "아직 생성된 데이터가 없습니다."}, status=http_status.HTTP_404_NOT_FOUND)
 
+    if session.purpose == MeasurementSession.Purpose.LIVE:
+        rule_result = evaluate_live_session_rules(session, reading)
+        state = build_live_state(
+            rule_result,
+            session.bag.product_model.care_guideline,
+        )
+    else:
+        state = build_live_state(
+            {"active_rules": [], "unavailable_rules": []},
+            {},
+        )
+
     presentation_values = build_sensor_presentation_values(
         strap_load=reading["strap_load"],
         load_bias=reading["load_bias"],
@@ -63,6 +77,7 @@ def latest_reading_view(request, session_id):
             "presentation": {
                 "values": presentation_values,
                 "display_metrics": display_metrics,
+                "state": state,
             },
         }
     )

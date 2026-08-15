@@ -18,9 +18,11 @@ from simulation.services import calculate_total_reading_count, generate_single_r
 
 from .management.commands.seed_demo_live_data import (
     PRODUCT_A_DISPLAY_METRICS,
+    PRODUCT_A_LIVE_STATES,
     PRODUCT_A_SCENARIO_DEFAULTS,
     PRODUCT_B_CARE_ACTIONS,
     PRODUCT_B_DISPLAY_METRICS,
+    PRODUCT_B_LIVE_STATES,
     PRODUCT_B_PUBLIC_TOKEN,
     PRODUCT_B_SCENARIO_DEFAULTS,
 )
@@ -56,6 +58,7 @@ class SeedDemoLiveDataTests(TestCase):
                 "note": "기존 Product A note",
                 "existing_extension": {"preserved": True},
                 "live_presentation": {"existing_live_extension": True},
+                "live_states": {"existing_state_extension": True},
             },
         )
         self.bag_a = Bag.objects.create(
@@ -174,6 +177,28 @@ class SeedDemoLiveDataTests(TestCase):
             ],
             True,
         )
+        self.assertEqual(
+            {
+                key: self.product_a.care_guideline["live_states"][key]
+                for key in ("stable", "states", "fallback_active")
+            },
+            PRODUCT_A_LIVE_STATES,
+        )
+        self.assertEqual(
+            [
+                state["code"]
+                for state in self.product_a.care_guideline["live_states"][
+                    "states"
+                ]
+            ],
+            ["SHAPE_RISK", "HEAT_EXPOSURE"],
+        )
+        self.assertIs(
+            self.product_a.care_guideline["live_states"][
+                "existing_state_extension"
+            ],
+            True,
+        )
 
         hot_car = SimulationScenario.objects.get(code="HOT_CAR_LIVE")
         self.assertEqual(hot_car.pk, protected["hot_car_pk"])
@@ -193,6 +218,20 @@ class SeedDemoLiveDataTests(TestCase):
         )
         self.assertEqual(
             product_b.care_guideline["care_actions"], PRODUCT_B_CARE_ACTIONS
+        )
+        self.assertEqual(
+            {
+                key: product_b.care_guideline["live_states"][key]
+                for key in ("stable", "states", "fallback_active")
+            },
+            PRODUCT_B_LIVE_STATES,
+        )
+        self.assertEqual(
+            [
+                state["code"]
+                for state in product_b.care_guideline["live_states"]["states"]
+            ],
+            ["HUMIDITY_RETENTION", "MOISTURE_CONTACT"],
         )
         self.assertEqual(product_b.care_guideline["max_humidity_percent"], 60)
         self.assertEqual(product_b.care_guideline["max_load_kg"], 5.5)
@@ -389,6 +428,7 @@ class SeedDemoLiveDataTests(TestCase):
             care_guideline={
                 "existing_extension": True,
                 "live_presentation": {"existing_live_extension": True},
+                "live_states": {"existing_state_extension": True},
             },
         )
 
@@ -410,6 +450,12 @@ class SeedDemoLiveDataTests(TestCase):
         self.assertIs(
             product_b.care_guideline["live_presentation"][
                 "existing_live_extension"
+            ],
+            True,
+        )
+        self.assertIs(
+            product_b.care_guideline["live_states"][
+                "existing_state_extension"
             ],
             True,
         )

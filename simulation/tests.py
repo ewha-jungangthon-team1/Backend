@@ -155,9 +155,29 @@ class LiveResponseContractTests(APITestCase):
         self.assertIsInstance(payload["is_finished"], bool)
 
         self.assertEqual(
-            set(payload["presentation"]), {"values", "display_metrics"}
+            set(payload["presentation"]), {"values", "display_metrics", "state"}
         )
         self.assertEqual(payload["presentation"]["display_metrics"], [])
+        self.assertEqual(
+            payload["presentation"]["state"],
+            {
+                "code": None,
+                "primary_rule": None,
+                "active_rules": [],
+                "unavailable_rules": [
+                    "HIGH_LOAD",
+                    "HIGH_TEMPERATURE",
+                    "HIGH_HUMIDITY",
+                    "LOAD_BIAS",
+                    "DEFORMATION",
+                    "MOISTURE",
+                ],
+                "headline": None,
+                "description": None,
+                "quick_care": None,
+                "theme_key": None,
+            },
+        )
         presentation_values = payload["presentation"]["values"]
         self.assertEqual(
             set(presentation_values),

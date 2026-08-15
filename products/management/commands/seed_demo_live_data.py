@@ -66,6 +66,89 @@ PRODUCT_B_CARE_ACTIONS = {
     },
 }
 
+LIVE_STATE_FALLBACK = {
+    "code": "ATTENTION",
+    "headline": "가방 상태에 변화가 감지됐어요",
+    "description": "일부 센서 값이 관리 기준을 벗어나 현재 상태를 확인하고 있어요.",
+    "quick_care": "가방 상태를 확인해 주세요.",
+    "theme_key": "attention",
+}
+
+PRODUCT_A_LIVE_STATES = {
+    "stable": {
+        "code": "STABLE",
+        "headline": "현재 가방 상태를 확인하고 있어요",
+        "description": "온도와 하중, 형태 편차를 실시간으로 확인하고 있어요.",
+        "quick_care": "현재 상태를 계속 확인해 주세요.",
+        "theme_key": "stable",
+    },
+    "states": [
+        {
+            "code": "SHAPE_RISK",
+            "required_rules": [
+                "HIGH_TEMPERATURE",
+                "LOAD_BIAS",
+                "DEFORMATION",
+            ],
+            "primary_rule": "DEFORMATION",
+            "headline": "가방의 형태 변화가 감지되고 있어요",
+            "description": (
+                "높은 온도에 노출된 상태에서 하중 편중과 형태 편차가 "
+                "함께 감지되고 있어요."
+            ),
+            "quick_care": "내용물을 비우고 가방을 세워 주세요.",
+            "theme_key": "shape_warning",
+        },
+        {
+            "code": "HEAT_EXPOSURE",
+            "required_rules": ["HIGH_TEMPERATURE"],
+            "primary_rule": "HIGH_TEMPERATURE",
+            "headline": "가방이 높은 온도에 노출되고 있어요",
+            "description": (
+                "현재 온도가 관리 기준을 넘어 높은 온도에 노출되고 있어요."
+            ),
+            "quick_care": "가방을 서늘한 곳으로 옮겨 주세요.",
+            "theme_key": "heat_warning",
+        },
+    ],
+    "fallback_active": LIVE_STATE_FALLBACK,
+}
+
+PRODUCT_B_LIVE_STATES = {
+    "stable": {
+        "code": "STABLE",
+        "headline": "현재 가방 상태를 확인하고 있어요",
+        "description": "소재 수분과 내부 습도를 실시간으로 확인하고 있어요.",
+        "quick_care": "현재 상태를 계속 확인해 주세요.",
+        "theme_key": "stable",
+    },
+    "states": [
+        {
+            "code": "HUMIDITY_RETENTION",
+            "required_rules": ["MOISTURE", "HIGH_HUMIDITY"],
+            "primary_rule": "HIGH_HUMIDITY",
+            "headline": "가방 내부 습도가 높게 감지되고 있어요",
+            "description": (
+                "수분 접촉 이후 내부 습도가 관리 기준을 넘은 상태예요."
+            ),
+            "quick_care": "가방을 열어 통풍이 잘되는 곳에 두어 주세요.",
+            "theme_key": "humidity_warning",
+        },
+        {
+            "code": "MOISTURE_CONTACT",
+            "required_rules": ["MOISTURE"],
+            "primary_rule": "MOISTURE",
+            "headline": "스웨이드 소재에 수분 접촉이 감지됐어요",
+            "description": (
+                "수분 접촉이 감지되어 스웨이드 소재의 상태를 계속 확인하고 있어요."
+            ),
+            "quick_care": "내용물을 꺼내고 가방을 열어 주세요.",
+            "theme_key": "moisture_warning",
+        },
+    ],
+    "fallback_active": LIVE_STATE_FALLBACK,
+}
+
 PRODUCT_A_SCENARIO_DEFAULTS = {
     "name": "Hot Car (Live)",
     "scenario_type": SimulationScenario.ScenarioType.HIGH_TEMPERATURE,
@@ -117,6 +200,15 @@ def _merge_live_presentation(guideline, display_metrics, description):
     )
     live_presentation["display_metrics"] = deepcopy(display_metrics)
     guideline["live_presentation"] = live_presentation
+
+
+def _merge_live_states(guideline, configured_live_states, description):
+    live_states = _require_mapping(
+        guideline.get("live_states", {}),
+        f"{description}.live_states",
+    )
+    live_states.update(deepcopy(configured_live_states))
+    guideline["live_states"] = live_states
 
 
 class Command(BaseCommand):
@@ -197,6 +289,11 @@ class Command(BaseCommand):
             PRODUCT_A_DISPLAY_METRICS,
             "Product A care_guideline",
         )
+        _merge_live_states(
+            guideline,
+            PRODUCT_A_LIVE_STATES,
+            "Product A care_guideline",
+        )
 
         product_a.brand, product_a.model_name = PRODUCT_A_FINAL_IDENTITY
         product_a.material = "Leather"
@@ -250,6 +347,11 @@ class Command(BaseCommand):
         _merge_live_presentation(
             guideline,
             PRODUCT_B_DISPLAY_METRICS,
+            "Product B care_guideline",
+        )
+        _merge_live_states(
+            guideline,
+            PRODUCT_B_LIVE_STATES,
             "Product B care_guideline",
         )
         guideline.update(
