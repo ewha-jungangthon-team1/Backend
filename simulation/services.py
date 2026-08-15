@@ -104,7 +104,7 @@ def calculate_progress(session):
     total_count = calculate_total_reading_count(scenario)
     raw_index = logical_elapsed / scenario.sample_interval_seconds
     target_sequence = min(int(raw_index), total_count - 1)
-    local_ratio = (raw_index - target_sequence) if target_sequence < total_count - 1 else 0.0
+    local_ratio = min(max(raw_index - target_sequence, 0.0), 1.0)
 
     return target_sequence, total_count, local_ratio
 
@@ -275,6 +275,7 @@ def ensure_live_session(bag):
         if elapsed <= DEMO_REAL_SECONDS:
             return existing, False
         # 앱을 닫고 가버려서 데모 시간이 다 지났는데도 RUNNING으로 남아있던 세션 → 정리
+        ensure_readings_up_to_now(existing)
         existing.status = MeasurementSession.Status.COMPLETED
         existing.ended_at = timezone.now()
         existing.save(update_fields=["status", "ended_at"])

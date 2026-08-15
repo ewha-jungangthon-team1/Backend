@@ -10,13 +10,19 @@ from django.utils.dateparse import parse_datetime
 from django.urls import reverse
 from rest_framework.test import APITestCase
 
+from analysis.live_rules import evaluate_live_session_rules
+from analysis.live_state import build_live_state
+from measurements.home import build_sensor_presentation_values
 from measurements.models import MeasurementSession
 from products.models import Bag, ProductModel
 
 from .models import SimulationScenario
 from .services import (
     DEMO_REAL_SECONDS,
+    FIELD_NAMES,
+    FIELD_PRECISION,
     POLLING_INTERVAL_SECONDS,
+    calculate_progress,
     generate_single_reading,
     get_latest_reading,
 )
@@ -397,6 +403,288 @@ class LiveResponseContractTests(APITestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertIn("detail", response.data)
+
+
+class LiveCompletionBoundaryTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        owner = get_user_model().objects.create_user(
+            username="live-completion-owner",
+            password="test-password",
+        )
+        cls.product_model = ProductModel.objects.create(
+            brand="Completion Brand",
+            model_name="Completion Model",
+            material="Leather",
+            demo_live_scenario_code="COMPLETION_BOUNDARY_LIVE",
+            care_guideline={
+                "avoid_moisture": False,
+                "max_load_kg": 5.5,
+                "recommended_temp_range_c": [0, 35],
+                "max_humidity_percent": 90,
+                "max_abs_load_bias": 0.30,
+                "max_body_deformation_ratio": 0.03,
+                "live_presentation": {
+                    "display_metrics": [
+                        {"key": "right_load_percent", "label": "우측 하중", "unit": "%"},
+                        {"key": "shape_deviation_percent", "label": "형태 편차", "unit": "%"},
+                        {"key": "temperature_c", "label": "현재 온도", "unit": "°C"},
+                    ]
+                },
+                "live_states": {
+                    "stable": {
+                        "code": "STABLE",
+                        "headline": "Stable",
+                        "description": "Stable description",
+                        "quick_care": "Stable care",
+                        "theme_key": "stable",
+                    },
+                    "states": [
+                        {
+                            "code": "FINAL_RISK",
+                            "required_rules": [
+                                "HIGH_TEMPERATURE",
+                                "LOAD_BIAS",
+                                "DEFORMATION",
+                            ],
+                            "primary_rule": "DEFORMATION",
+                            "headline": "Final risk",
+                            "description": "Final risk description",
+                            "quick_care": "Final care",
+                            "theme_key": "final_risk",
+                        }
+                    ],
+                },
+            },
+        )
+        cls.bag = Bag.objects.create(
+            product_model=cls.product_model,
+            owner=owner,
+            nfc_uid="LIVE-COMPLETION-NFC",
+        )
+        cls.scenario = SimulationScenario.objects.create(
+            code="COMPLETION_BOUNDARY_LIVE",
+            name="Completion Boundary Live",
+            scenario_type=SimulationScenario.ScenarioType.HIGH_TEMPERATURE,
+            mode=SimulationScenario.Mode.LIVE,
+            logical_duration_seconds=86400,
+            sample_interval_seconds=3600,
+            config={
+                "strap_load": {"start": 2, "end": 4},
+                "humidity": {"start": 48, "end": 78},
+                "temperature": {"start": 33, "end": 47},
+                "load_bias": {"start": 0.1, "end": 0.6},
+                "body_deformation_ratio": {"start": 0.005, "end": 0.06},
+                "material_moisture_percent": {"start": 58, "end": 42},
+                "moisture_event": {"enabled": False},
+            },
+        )
+        cls.started_at = datetime(
+            2026,
+            8,
+            14,
+            12,
+            tzinfo=ZoneInfo("Asia/Seoul"),
+        )
+
+    def setUp(self):
+        self.current_time = self.started_at
+        progress_clock_patch = patch(
+            "simulation.services.timezone.now",
+            side_effect=lambda: self.current_time,
+        )
+        observation_clock_patch = patch(
+            "simulation.services.get_current_time",
+            side_effect=lambda: self.current_time,
+        )
+        progress_clock_patch.start()
+        observation_clock_patch.start()
+        self.addCleanup(progress_clock_patch.stop)
+        self.addCleanup(observation_clock_patch.stop)
+
+    def create_session(self, *, started_at=None, status=MeasurementSession.Status.RUNNING):
+        return MeasurementSession.objects.create(
+            bag=self.bag,
+            scenario=self.scenario,
+            purpose=MeasurementSession.Purpose.LIVE,
+            seed=24680,
+            started_at=started_at or self.started_at,
+            status=status,
+        )
+
+    def get_latest(self, session):
+        return self.client.get(
+            reverse("latest-reading", kwargs={"session_id": session.pk})
+        )
+
+    def ensure(self):
+        return self.client.post(
+            reverse(
+                "ensure-live-session",
+                kwargs={"public_token": self.bag.public_token},
+            )
+        )
+
+    def assert_raw_matches_stored(self, payload, reading):
+        for field in FIELD_NAMES:
+            stored_value = getattr(reading, field)
+            expected = float(stored_value) if stored_value is not None else None
+            self.assertEqual(payload[field], expected, field)
+
+    def test_calculate_progress_preserves_final_interval_ratio(self):
+        session = self.create_session()
+
+        for elapsed, expected_ratio in (
+            (172.5, 0.0),
+            (179, 13 / 15),
+            (180, 1.0),
+            (181, 1.0),
+        ):
+            with self.subTest(elapsed=elapsed):
+                self.current_time = self.started_at + timedelta(seconds=elapsed)
+                target_sequence, total_count, local_ratio = calculate_progress(session)
+                self.assertEqual(target_sequence, 23)
+                self.assertEqual(total_count, 24)
+                self.assertAlmostEqual(local_ratio, expected_ratio)
+
+    def test_179_seconds_interpolates_sequence_22_toward_sequence_23(self):
+        session = self.create_session()
+        self.current_time = self.started_at + timedelta(seconds=179)
+
+        result = get_latest_reading(session)
+
+        previous = session.readings.get(sequence=22)
+        final = session.readings.get(sequence=23)
+        ratio = 13 / 15
+        self.assertEqual(result["sequence"], 23)
+        self.assertEqual(result["progress_ratio"], 0.994)
+        self.assertIs(result["is_finished"], False)
+        session.refresh_from_db()
+        self.assertEqual(session.status, MeasurementSession.Status.RUNNING)
+        for field in FIELD_NAMES:
+            previous_value = getattr(previous, field)
+            final_value = getattr(final, field)
+            expected = round(
+                float(previous_value)
+                + (float(final_value) - float(previous_value)) * ratio,
+                FIELD_PRECISION[field],
+            )
+            self.assertEqual(result[field], expected, field)
+
+    def test_180_seconds_returns_final_lineage_and_completed_reread_is_stable(self):
+        session = self.create_session()
+        self.current_time = self.started_at + timedelta(seconds=180)
+
+        finished_response = self.get_latest(session)
+        finished = finished_response.data
+        session.refresh_from_db()
+        final = session.readings.get(sequence=23)
+
+        self.assertEqual(finished_response.status_code, 200)
+        self.assertEqual(finished["sequence"], 23)
+        self.assertEqual(finished["progress_ratio"], 1.0)
+        self.assertIs(finished["is_finished"], True)
+        self.assertEqual(session.readings.count(), 24)
+        self.assertEqual(session.status, MeasurementSession.Status.COMPLETED)
+        self.assert_raw_matches_stored(finished, final)
+
+        expected_values = build_sensor_presentation_values(
+            strap_load=finished["strap_load"],
+            load_bias=finished["load_bias"],
+            body_deformation_ratio=finished["body_deformation_ratio"],
+            temperature=finished["temperature"],
+            humidity=finished["humidity"],
+            material_moisture_percent=finished["material_moisture_percent"],
+        )
+        expected_rules = evaluate_live_session_rules(session, finished)
+        expected_state = build_live_state(
+            expected_rules,
+            self.product_model.care_guideline,
+        )
+        self.assertEqual(finished["presentation"]["values"], expected_values)
+        self.assertEqual(finished["presentation"]["state"], expected_state)
+
+        final_numeric = {field: finished[field] for field in FIELD_NAMES}
+        final_presentation = finished["presentation"]
+        final_ended_at = session.ended_at
+        self.current_time += timedelta(seconds=2)
+
+        repeated_response = self.get_latest(session)
+        repeated = repeated_response.data
+        session.refresh_from_db()
+
+        self.assertEqual(repeated_response.status_code, 200)
+        self.assertEqual(repeated["sequence"], 23)
+        self.assertEqual(repeated["progress_ratio"], 1.0)
+        self.assertIs(repeated["is_finished"], True)
+        self.assertEqual(
+            {field: repeated[field] for field in FIELD_NAMES},
+            final_numeric,
+        )
+        self.assertEqual(repeated["presentation"], final_presentation)
+        self.assertEqual(session.readings.count(), 24)
+        self.assertEqual(session.status, MeasurementSession.Status.COMPLETED)
+        self.assertEqual(session.ended_at, final_ended_at)
+
+    def test_exact_180_ensure_reuses_then_latest_completes_existing_session(self):
+        session = self.create_session()
+        self.current_time = self.started_at + timedelta(seconds=180)
+
+        ensured = self.ensure()
+
+        self.assertEqual(ensured.status_code, 200)
+        self.assertEqual(ensured.data["session_id"], session.pk)
+        self.assertIs(ensured.data["created"], False)
+        self.assertEqual(ensured.data["status"], MeasurementSession.Status.RUNNING)
+
+        finished = self.get_latest(session)
+        session.refresh_from_db()
+        self.assertEqual(finished.data["sequence"], 23)
+        self.assertEqual(finished.data["progress_ratio"], 1.0)
+        self.assertIs(finished.data["is_finished"], True)
+        self.assertEqual(session.status, MeasurementSession.Status.COMPLETED)
+        self.assertEqual(session.readings.count(), 24)
+        self.assert_raw_matches_stored(
+            finished.data,
+            session.readings.get(sequence=23),
+        )
+
+    def test_stale_ensure_fills_old_session_before_completion_and_creates_new(self):
+        stale = self.create_session()
+        self.current_time = self.started_at + timedelta(seconds=181)
+
+        ensured = self.ensure()
+
+        stale.refresh_from_db()
+        self.assertEqual(ensured.status_code, 200)
+        self.assertIs(ensured.data["created"], True)
+        self.assertNotEqual(ensured.data["session_id"], stale.pk)
+        self.assertEqual(stale.status, MeasurementSession.Status.COMPLETED)
+        self.assertEqual(stale.readings.count(), 24)
+
+        stale_response = self.get_latest(stale)
+        self.assertEqual(stale_response.status_code, 200)
+        self.assertEqual(stale_response.data["sequence"], 23)
+        self.assertEqual(stale_response.data["progress_ratio"], 1.0)
+        self.assertIs(stale_response.data["is_finished"], True)
+        self.assert_raw_matches_stored(
+            stale_response.data,
+            stale.readings.get(sequence=23),
+        )
+
+    def test_completed_session_does_not_block_new_ensure_session(self):
+        completed = self.create_session(status=MeasurementSession.Status.COMPLETED)
+        completed.ended_at = self.started_at
+        completed.save(update_fields=["ended_at"])
+
+        ensured = self.ensure()
+
+        self.assertEqual(ensured.status_code, 200)
+        self.assertIs(ensured.data["created"], True)
+        self.assertNotEqual(ensured.data["session_id"], completed.pk)
+        completed.refresh_from_db()
+        self.assertEqual(completed.status, MeasurementSession.Status.COMPLETED)
+        self.assertEqual(completed.ended_at, self.started_at)
 
 
 class ProductSpecificLiveScenarioTests(APITestCase):

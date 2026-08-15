@@ -1,5 +1,7 @@
 from copy import deepcopy
+from datetime import datetime, timedelta
 from unittest.mock import patch
+from zoneinfo import ZoneInfo
 
 from django.contrib.auth import get_user_model
 from django.test import override_settings
@@ -8,15 +10,19 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from measurements.models import MeasurementSession, SensorReading
+from measurements.home import build_sensor_presentation_values
 from products.management.commands.seed_demo_live_data import (
     PRODUCT_A_DISPLAY_METRICS,
     PRODUCT_A_LIVE_STATES,
+    PRODUCT_A_SCENARIO_DEFAULTS,
     PRODUCT_B_DISPLAY_METRICS,
     PRODUCT_B_LIVE_STATES,
+    PRODUCT_B_SCENARIO_DEFAULTS,
 )
 from products.models import Bag, ProductModel
 
 from .models import SimulationScenario
+from .services import FIELD_NAMES
 
 
 def build_guideline(display_metrics, live_states, max_humidity):
@@ -268,3 +274,205 @@ class LatestReadingStateIntegrationTests(APITestCase):
                 )
 
         self.assertEqual(response.status_code, 200)
+
+
+@override_settings(USE_TZ=True)
+class ProductLiveProgressionE2ETests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        owner = get_user_model().objects.create_user(
+            username="product-live-e2e-owner",
+            password="test-password",
+        )
+        cls.product_a = ProductModel.objects.create(
+            brand="MCM",
+            model_name="Vela Visetos Sling Bag E2E",
+            material="Leather",
+            care_guideline=build_guideline(
+                PRODUCT_A_DISPLAY_METRICS,
+                PRODUCT_A_LIVE_STATES,
+                70,
+            ),
+            demo_live_scenario_code="HOT_CAR_LIVE_E2E",
+        )
+        cls.product_b = ProductModel.objects.create(
+            brand="MCM",
+            model_name="Visetos Original Boston Bag E2E",
+            material="Suede",
+            care_guideline=build_guideline(
+                PRODUCT_B_DISPLAY_METRICS,
+                PRODUCT_B_LIVE_STATES,
+                60,
+            ),
+            demo_live_scenario_code="RAIN_MOISTURE_LIVE_E2E",
+        )
+        bag_a = Bag.objects.create(
+            product_model=cls.product_a,
+            owner=owner,
+            nfc_uid="LIVE-E2E-A",
+        )
+        bag_b = Bag.objects.create(
+            product_model=cls.product_b,
+            owner=owner,
+            nfc_uid="LIVE-E2E-B",
+        )
+        scenario_a_defaults = deepcopy(PRODUCT_A_SCENARIO_DEFAULTS)
+        scenario_a_defaults["name"] = "Hot Car Live E2E"
+        scenario_b_defaults = deepcopy(PRODUCT_B_SCENARIO_DEFAULTS)
+        scenario_b_defaults["name"] = "Rain Moisture Live E2E"
+        scenario_a = SimulationScenario.objects.create(
+            code="HOT_CAR_LIVE_E2E",
+            **scenario_a_defaults,
+        )
+        scenario_b = SimulationScenario.objects.create(
+            code="RAIN_MOISTURE_LIVE_E2E",
+            **scenario_b_defaults,
+        )
+        cls.started_at = datetime(
+            2026,
+            8,
+            14,
+            12,
+            tzinfo=ZoneInfo("Asia/Seoul"),
+        )
+        cls.session_a = MeasurementSession.objects.create(
+            bag=bag_a,
+            scenario=scenario_a,
+            purpose=MeasurementSession.Purpose.LIVE,
+            seed=13579,
+            started_at=cls.started_at,
+            status=MeasurementSession.Status.RUNNING,
+        )
+        cls.session_b = MeasurementSession.objects.create(
+            bag=bag_b,
+            scenario=scenario_b,
+            purpose=MeasurementSession.Purpose.LIVE,
+            seed=97531,
+            started_at=cls.started_at,
+            status=MeasurementSession.Status.RUNNING,
+        )
+
+    def setUp(self):
+        self.current_time = self.started_at
+        progress_clock_patch = patch(
+            "simulation.services.timezone.now",
+            side_effect=lambda: self.current_time,
+        )
+        observation_clock_patch = patch(
+            "simulation.services.get_current_time",
+            side_effect=lambda: self.current_time,
+        )
+        progress_clock_patch.start()
+        observation_clock_patch.start()
+        self.addCleanup(progress_clock_patch.stop)
+        self.addCleanup(observation_clock_patch.stop)
+
+    def get_latest(self, session, elapsed):
+        self.current_time = self.started_at + timedelta(seconds=elapsed)
+        response = self.client.get(
+            reverse("latest-reading", kwargs={"session_id": session.pk})
+        )
+        self.assertEqual(response.status_code, 200)
+        return response.data
+
+    def assert_final_lineage(self, session, payload):
+        session.refresh_from_db()
+        final = session.readings.get(sequence=23)
+        for field in FIELD_NAMES:
+            stored_value = getattr(final, field)
+            expected = float(stored_value) if stored_value is not None else None
+            self.assertEqual(payload[field], expected, field)
+        self.assertEqual(
+            payload["presentation"]["values"],
+            build_sensor_presentation_values(
+                strap_load=payload["strap_load"],
+                load_bias=payload["load_bias"],
+                body_deformation_ratio=payload["body_deformation_ratio"],
+                temperature=payload["temperature"],
+                humidity=payload["humidity"],
+                material_moisture_percent=payload["material_moisture_percent"],
+            ),
+        )
+        self.assertEqual(payload["sequence"], 23)
+        self.assertEqual(payload["progress_ratio"], 1.0)
+        self.assertIs(payload["is_finished"], True)
+        self.assertEqual(session.status, MeasurementSession.Status.COMPLETED)
+        self.assertEqual(session.readings.count(), 24)
+
+    def test_product_a_progresses_stable_to_heat_to_shape_risk(self):
+        early = self.get_latest(self.session_a, 0)
+        middle = self.get_latest(self.session_a, 45)
+        biased = self.get_latest(self.session_a, 81)
+        later = self.get_latest(self.session_a, 100)
+        final = self.get_latest(self.session_a, 180)
+
+        self.assertEqual(early["presentation"]["state"]["code"], "STABLE")
+        self.assertEqual(
+            middle["presentation"]["state"]["active_rules"],
+            ["HIGH_TEMPERATURE"],
+        )
+        self.assertEqual(middle["presentation"]["state"]["code"], "HEAT_EXPOSURE")
+        self.assertEqual(
+            biased["presentation"]["state"]["active_rules"],
+            ["HIGH_TEMPERATURE", "LOAD_BIAS"],
+        )
+        self.assertEqual(biased["presentation"]["state"]["code"], "HEAT_EXPOSURE")
+        self.assertEqual(
+            later["presentation"]["state"]["active_rules"],
+            ["HIGH_TEMPERATURE", "LOAD_BIAS", "DEFORMATION"],
+        )
+        self.assertEqual(later["presentation"]["state"]["code"], "SHAPE_RISK")
+        self.assertEqual(
+            final["presentation"]["state"]["active_rules"],
+            ["HIGH_TEMPERATURE", "LOAD_BIAS", "DEFORMATION"],
+        )
+        self.assertEqual(final["presentation"]["state"]["code"], "SHAPE_RISK")
+        self.assert_final_lineage(self.session_a, final)
+
+    def test_product_b_latches_moisture_then_transitions_to_humidity_retention(self):
+        initial = self.get_latest(self.session_b, 0)
+        middle = self.get_latest(self.session_b, 60)
+        later = self.get_latest(self.session_b, 90)
+        final = self.get_latest(self.session_b, 180)
+
+        self.assertIs(initial["moisture_detected"], True)
+        self.assertEqual(
+            initial["presentation"]["state"]["active_rules"],
+            ["MOISTURE"],
+        )
+        self.assertEqual(
+            initial["presentation"]["state"]["code"],
+            "MOISTURE_CONTACT",
+        )
+        self.assertIs(middle["moisture_detected"], False)
+        self.assertEqual(
+            middle["presentation"]["state"]["active_rules"],
+            ["MOISTURE"],
+        )
+        self.assertEqual(
+            middle["presentation"]["state"]["code"],
+            "MOISTURE_CONTACT",
+        )
+        self.assertLess(
+            middle["material_moisture_percent"],
+            initial["material_moisture_percent"],
+        )
+        self.assertIs(later["moisture_detected"], False)
+        self.assertEqual(
+            later["presentation"]["state"]["active_rules"],
+            ["HIGH_HUMIDITY", "MOISTURE"],
+        )
+        self.assertEqual(
+            later["presentation"]["state"]["code"],
+            "HUMIDITY_RETENTION",
+        )
+        self.assertIs(final["moisture_detected"], False)
+        self.assertEqual(
+            final["presentation"]["state"]["active_rules"],
+            ["HIGH_HUMIDITY", "MOISTURE"],
+        )
+        self.assertEqual(
+            final["presentation"]["state"]["code"],
+            "HUMIDITY_RETENTION",
+        )
+        self.assert_final_lineage(self.session_b, final)
