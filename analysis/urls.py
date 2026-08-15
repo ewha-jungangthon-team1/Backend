@@ -15,6 +15,11 @@ urlpatterns = [
         name="analyze-history-session",
     ),
     path(
+        "sessions/<int:session_id>/care/",
+        views.live_care_view,
+        name="live-care",
+    ),
+    path(
         "reports/<int:report_id>/",
         views.analysis_report_detail_view,
         name="analysis-report-detail",
