@@ -49,11 +49,11 @@ class LiveResponseContractTests(APITestCase):
             logical_duration_seconds=86400,
             sample_interval_seconds=3600,
             config={
-                "strap_load": {"min": 2.5, "max": 4.0},
-                "humidity": {"min": 40, "max": 55},
-                "temperature": {"min": 22, "max": 26},
-                "load_bias": {"min": -0.1, "max": 0.1},
-                "body_deformation_ratio": {"min": 0.005, "max": 0.012},
+                "strap_load": {"min": 3.25, "max": 3.25},
+                "humidity": {"min": 58, "max": 58},
+                "temperature": {"min": 33.5, "max": 33.5},
+                "load_bias": {"min": 0.36, "max": 0.36},
+                "body_deformation_ratio": {"min": 0.025, "max": 0.025},
                 "moisture_event": {"enabled": False},
             },
         )
@@ -114,25 +114,24 @@ class LiveResponseContractTests(APITestCase):
         payload = self.json_payload(response)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            set(payload),
-            {
-                "session_id",
-                "sequence",
-                "measured_at",
-                "observed_at",
-                "scenario_type",
-                "progress_ratio",
-                "is_finished",
-                "moisture_detected",
-                "strap_load",
-                "humidity",
-                "temperature",
-                "load_bias",
-                "body_deformation_ratio",
-                "material_moisture_percent",
-            },
-        )
+        raw_fields = {
+            "session_id",
+            "sequence",
+            "measured_at",
+            "observed_at",
+            "scenario_type",
+            "progress_ratio",
+            "is_finished",
+            "moisture_detected",
+            "strap_load",
+            "humidity",
+            "temperature",
+            "load_bias",
+            "body_deformation_ratio",
+            "material_moisture_percent",
+        }
+        self.assertTrue(raw_fields.issubset(payload))
+        self.assertEqual(set(payload), raw_fields | {"presentation"})
         self.assertNotIn("polling_interval_seconds", payload)
         self.assertNotIn("strap_strain", payload)
         for field_name in (
@@ -148,6 +147,30 @@ class LiveResponseContractTests(APITestCase):
         self.assertIsInstance(payload["moisture_detected"], bool)
         self.assertIsNone(payload["material_moisture_percent"])
         self.assertIsInstance(payload["is_finished"], bool)
+
+        self.assertEqual(set(payload["presentation"]), {"values"})
+        presentation_values = payload["presentation"]["values"]
+        self.assertEqual(
+            set(presentation_values),
+            {
+                "total_load_kg",
+                "bias_magnitude_percent",
+                "left_load_percent",
+                "right_load_percent",
+                "shape_deviation_percent",
+                "temperature_c",
+                "internal_humidity_percent",
+                "material_moisture_percent",
+            },
+        )
+        self.assertEqual(payload["load_bias"], 0.36)
+        self.assertEqual(presentation_values["bias_magnitude_percent"], 36)
+        self.assertEqual(presentation_values["left_load_percent"], 32)
+        self.assertEqual(presentation_values["right_load_percent"], 68)
+        self.assertEqual(presentation_values["shape_deviation_percent"], 2.5)
+        self.assertEqual(presentation_values["internal_humidity_percent"], 58)
+        self.assertEqual(presentation_values["temperature_c"], 33.5)
+        self.assertIsNone(presentation_values["material_moisture_percent"])
 
         reading = MeasurementSession.objects.get(
             pk=payload["session_id"]
@@ -550,3 +573,35 @@ class MaterialMoistureGenerationTests(APITestCase):
         result = self.get_interpolated_reading(session, latest)
 
         self.assertIsNone(result["material_moisture_percent"])
+
+    def test_latest_reading_api_presents_numeric_material_moisture(self):
+        session = self.create_session(
+            "API_NUMERIC",
+            material_moisture_config={"min": 42.5, "max": 42.5},
+        )
+
+        with (
+            patch(
+                "simulation.services.timezone.now",
+                return_value=self.started_at,
+            ),
+            patch(
+                "simulation.services.get_current_time",
+                return_value=self.started_at,
+            ),
+        ):
+            response = self.client.get(
+                reverse(
+                    "latest-reading",
+                    kwargs={"session_id": session.id},
+                )
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["material_moisture_percent"], 42.5)
+        self.assertEqual(
+            response.data["presentation"]["values"][
+                "material_moisture_percent"
+            ],
+            42.5,
+        )

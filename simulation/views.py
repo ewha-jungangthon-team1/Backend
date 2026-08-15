@@ -4,8 +4,10 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
-from products.models import Bag
+from measurements.home import build_sensor_presentation_values
 from measurements.models import MeasurementSession
+from products.models import Bag
+
 from .serializers import LiveSessionSerializer
 from .services import (
     close_session,
@@ -41,7 +43,20 @@ def latest_reading_view(request, session_id):
     if reading is None:
         return Response({"detail": "아직 생성된 데이터가 없습니다."}, status=http_status.HTTP_404_NOT_FOUND)
 
-    return Response(reading)
+    presentation_values = build_sensor_presentation_values(
+        strap_load=reading["strap_load"],
+        load_bias=reading["load_bias"],
+        body_deformation_ratio=reading["body_deformation_ratio"],
+        temperature=reading["temperature"],
+        humidity=reading["humidity"],
+        material_moisture_percent=reading["material_moisture_percent"],
+    )
+    return Response(
+        {
+            **reading,
+            "presentation": {"values": presentation_values},
+        }
+    )
 
 
 # ------------------------------------------------------------
