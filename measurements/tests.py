@@ -2,12 +2,117 @@ from decimal import Decimal
 
 from django.contrib.auth import get_user_model
 from django.core.exceptions import ValidationError
-from django.test import TestCase
+from django.test import SimpleTestCase, TestCase
 from django.utils import timezone
 
 from products.models import Bag, ProductModel
 
+from .home import (
+    build_sensor_presentation_values,
+    calculate_bias_magnitude_percent,
+    calculate_deformation_percentage,
+    calculate_internal_humidity_percent,
+    calculate_left_load_percent,
+    calculate_load_bias_percentage,
+    calculate_load_distribution_percentages,
+    calculate_material_moisture_percent,
+    calculate_right_load_percent,
+    calculate_shape_deviation_percent,
+    calculate_temperature_c,
+    calculate_total_load_kg,
+)
 from .models import MeasurementSession, SensorReading
+
+
+class SensorPresentationHelperTests(SimpleTestCase):
+    def test_load_distribution_boundaries_and_example(self):
+        cases = (
+            (Decimal("-1"), 100, 0),
+            (Decimal("0"), 50, 50),
+            (Decimal("0.36"), 32, 68),
+            (Decimal("1"), 0, 100),
+        )
+
+        for load_bias, expected_left, expected_right in cases:
+            with self.subTest(load_bias=load_bias):
+                self.assertEqual(
+                    calculate_left_load_percent(load_bias),
+                    expected_left,
+                )
+                self.assertEqual(
+                    calculate_right_load_percent(load_bias),
+                    expected_right,
+                )
+
+    def test_bias_magnitude_is_separate_from_distribution(self):
+        for load_bias in (Decimal("-0.68"), 0.68):
+            with self.subTest(load_bias=load_bias):
+                self.assertEqual(
+                    calculate_bias_magnitude_percent(load_bias),
+                    68,
+                )
+
+        distribution = calculate_load_distribution_percentages(Decimal("0.68"))
+        self.assertEqual(distribution["left_load_percent"], 16)
+        self.assertEqual(distribution["right_load_percent"], 84)
+
+    def test_load_distribution_always_sums_to_one_hundred(self):
+        for load_bias in (-1, Decimal("-0.68"), 0, 0.36, Decimal("0.3333"), 1):
+            with self.subTest(load_bias=load_bias):
+                distribution = calculate_load_distribution_percentages(load_bias)
+                self.assertEqual(
+                    distribution["left_load_percent"]
+                    + distribution["right_load_percent"],
+                    100,
+                )
+
+    def test_shape_deviation_preserves_two_decimal_precision(self):
+        self.assertEqual(
+            calculate_shape_deviation_percent(Decimal("0.0250")),
+            2.5,
+        )
+        self.assertEqual(calculate_shape_deviation_percent(0.0684), 6.84)
+
+    def test_direct_sensor_aliases_do_not_change_scale(self):
+        self.assertEqual(calculate_total_load_kg(Decimal("3.25")), 3.25)
+        self.assertEqual(calculate_internal_humidity_percent(58), 58)
+        self.assertEqual(calculate_temperature_c(33.5), 33.5)
+
+    def test_optional_material_moisture_preserves_null_and_zero(self):
+        self.assertIsNone(calculate_material_moisture_percent(None))
+        self.assertEqual(calculate_material_moisture_percent(0), 0)
+        self.assertEqual(
+            calculate_material_moisture_percent(Decimal("42.50")),
+            42.5,
+        )
+
+    def test_builder_returns_only_common_numeric_presentation_values(self):
+        result = build_sensor_presentation_values(
+            strap_load=Decimal("3.25"),
+            load_bias=0.36,
+            body_deformation_ratio=Decimal("0.0684"),
+            temperature=33.5,
+            humidity=Decimal("58.00"),
+            material_moisture_percent=Decimal("42.50"),
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "total_load_kg": 3.25,
+                "bias_magnitude_percent": 36.0,
+                "left_load_percent": 32.0,
+                "right_load_percent": 68.0,
+                "shape_deviation_percent": 6.84,
+                "temperature_c": 33.5,
+                "internal_humidity_percent": 58.0,
+                "material_moisture_percent": 42.5,
+            },
+        )
+
+    def test_legacy_home_percentage_helpers_keep_existing_integer_behavior(self):
+        self.assertEqual(calculate_load_bias_percentage(Decimal("0.684")), 68)
+        self.assertEqual(calculate_deformation_percentage(Decimal("0.0684")), 7)
 
 
 class SensorReadingMaterialMoistureTests(TestCase):

@@ -1,8 +1,106 @@
+from decimal import ROUND_HALF_UP, Decimal
+
+
 # load_bias의 부호에 따른 방향 라벨/화면 위치값
 LOAD_DIRECTION_LABELS = {"left": "좌측", "right": "우측", "balanced": "균형"}
 LOAD_DIRECTION_POSITIONS = {"left": "left_strap", "right": "right_strap", "balanced": "center"}
- 
- 
+
+
+PRESENTATION_QUANTUM = Decimal("0.01")
+
+
+def _as_decimal(value):
+    return Decimal(str(value))
+
+
+def _as_presentation_number(value):
+    return float(
+        _as_decimal(value).quantize(
+            PRESENTATION_QUANTUM,
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+
+def calculate_total_load_kg(strap_load):
+    """strap_load kg raw value를 UI용 numeric 전체 하중으로 반환한다."""
+    return _as_presentation_number(strap_load)
+
+
+def calculate_bias_magnitude_percent(load_bias):
+    """load_bias의 방향을 제외한 편중 정도(%)를 반환한다."""
+    return _as_presentation_number(abs(_as_decimal(load_bias)) * 100)
+
+
+def calculate_load_distribution_percentages(load_bias):
+    """normalized load_bias를 좌우 실제 하중 분포(%)로 변환한다."""
+    bias = _as_decimal(load_bias)
+    left = (Decimal("50") * (Decimal("1") - bias)).quantize(
+        PRESENTATION_QUANTUM,
+        rounding=ROUND_HALF_UP,
+    )
+    right = (Decimal("100") - left).quantize(
+        PRESENTATION_QUANTUM,
+        rounding=ROUND_HALF_UP,
+    )
+    return {
+        "left_load_percent": float(left),
+        "right_load_percent": float(right),
+    }
+
+
+def calculate_left_load_percent(load_bias):
+    return calculate_load_distribution_percentages(load_bias)["left_load_percent"]
+
+
+def calculate_right_load_percent(load_bias):
+    return calculate_load_distribution_percentages(load_bias)["right_load_percent"]
+
+
+def calculate_shape_deviation_percent(body_deformation_ratio):
+    return _as_presentation_number(_as_decimal(body_deformation_ratio) * 100)
+
+
+def calculate_temperature_c(temperature):
+    return _as_presentation_number(temperature)
+
+
+def calculate_internal_humidity_percent(humidity):
+    return _as_presentation_number(humidity)
+
+
+def calculate_material_moisture_percent(material_moisture_percent):
+    if material_moisture_percent is None:
+        return None
+    return _as_presentation_number(material_moisture_percent)
+
+
+def build_sensor_presentation_values(
+    *,
+    strap_load,
+    load_bias,
+    body_deformation_ratio,
+    temperature,
+    humidity,
+    material_moisture_percent=None,
+):
+    """DB/API와 무관하게 raw sensor numeric value만 presentation 값으로 변환한다."""
+    load_distribution = calculate_load_distribution_percentages(load_bias)
+    return {
+        "total_load_kg": calculate_total_load_kg(strap_load),
+        "bias_magnitude_percent": calculate_bias_magnitude_percent(load_bias),
+        **load_distribution,
+        "shape_deviation_percent": calculate_shape_deviation_percent(
+            body_deformation_ratio
+        ),
+        "temperature_c": calculate_temperature_c(temperature),
+        "internal_humidity_percent": calculate_internal_humidity_percent(humidity),
+        "material_moisture_percent": calculate_material_moisture_percent(
+            material_moisture_percent
+        ),
+    }
+
+
 def determine_load_direction(load_bias):
     """
     load_bias(-1~1)의 부호를 보고 어느 쪽으로 쏠렸는지 판단한다.
@@ -19,20 +117,19 @@ def determine_load_direction(load_bias):
  
 def calculate_load_bias_percentage(load_bias):
     """
-    load_bias(-1~1)를 화면에 보여줄 0~100 크기(%)로 바꾼다.
-    방향(좌/우)은 여기서 다루지 않고 determine_load_direction()이 따로 판단한다.
-    → 예: load_bias=-0.68 이면 "좌측 68%", load_bias=0.68이면 "우측 68%"
+    기존 Home contract의 정수형 편중 정도를 계산한다.
+    abs(load_bias) * 100이며, 좌/우의 실제 하중 분포가 아니다.
     """
     return round(abs(float(load_bias)) * 100)
- 
- 
+
+
 def calculate_deformation_percentage(deformation_ratio):
-    """body_deformation_ratio(0~1)를 퍼센트 문자열용 숫자로 바꾼다."""
+    """기존 Home contract의 정수형 형태 편차를 계산한다."""
     return round(float(deformation_ratio) * 100)
- 
- 
+
+
 def build_smart_material_points(session, latest_reading):
-    """화면에 표시할 '스마트소재 감지 포인트' 목록(형태편차/좌우하중/온도)을 만든다."""
+    """기존 Home의 '스마트소재 감지 포인트' contract를 유지한다."""
     load_direction = determine_load_direction(latest_reading["load_bias"])
     load_label = f"{LOAD_DIRECTION_LABELS[load_direction]} 하중"
  
@@ -50,4 +147,3 @@ def build_smart_material_points(session, latest_reading):
             "value": f"{latest_reading['temperature']}℃",
         },
     ]
- 
