@@ -28,6 +28,7 @@ class LiveResponseContractTests(APITestCase):
             model_name="Test Live Bag",
             material="Leather",
             care_guideline={},
+            demo_live_scenario_code="NORMAL_LIVE",
         )
         cls.bag = Bag.objects.create(
             product_model=product_model,
@@ -238,3 +239,180 @@ class LiveResponseContractTests(APITestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertIn("detail", response.data)
+
+
+class ProductSpecificLiveScenarioTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.owner = get_user_model().objects.create_user(
+            username="product-live-owner",
+            password="test-password",
+        )
+        cls.hot_car_scenario = cls.create_scenario("HOT_CAR_LIVE")
+        cls.alternate_scenario = cls.create_scenario("ALTERNATE_PRODUCT_LIVE")
+        cls.inactive_scenario = cls.create_scenario(
+            "INACTIVE_PRODUCT_LIVE",
+            is_active=False,
+        )
+        cls.history_scenario = cls.create_scenario(
+            "PRODUCT_HISTORY",
+            mode=SimulationScenario.Mode.HISTORY,
+        )
+        cls.product_a, cls.bag_a = cls.create_product_and_bag(
+            "A",
+            cls.hot_car_scenario.code,
+        )
+        cls.product_b, cls.bag_b = cls.create_product_and_bag(
+            "B",
+            cls.alternate_scenario.code,
+        )
+        cls.started_at = datetime(
+            2026,
+            8,
+            14,
+            12,
+            tzinfo=ZoneInfo("Asia/Seoul"),
+        )
+
+    @classmethod
+    def create_scenario(cls, code, *, mode=SimulationScenario.Mode.LIVE, is_active=True):
+        return SimulationScenario.objects.create(
+            code=code,
+            name=code,
+            scenario_type=SimulationScenario.ScenarioType.HIGH_TEMPERATURE,
+            mode=mode,
+            logical_duration_seconds=86400,
+            sample_interval_seconds=3600,
+            config={
+                "strap_load": {"min": 2.5, "max": 4.0},
+                "humidity": {"min": 40, "max": 55},
+                "temperature": {"start": 28, "end": 42},
+                "load_bias": {"start": 0.1, "end": 0.6},
+                "body_deformation_ratio": {"start": 0.005, "end": 0.06},
+                "moisture_event": {"enabled": False},
+            },
+            is_active=is_active,
+        )
+
+    @classmethod
+    def create_product_and_bag(cls, suffix, scenario_code):
+        product = ProductModel.objects.create(
+            brand=f"Synthetic Brand {suffix}",
+            model_name=f"Synthetic Model {suffix}",
+            material="Leather",
+            care_guideline={},
+            demo_live_scenario_code=scenario_code,
+        )
+        bag = Bag.objects.create(
+            product_model=product,
+            owner=cls.owner,
+            nfc_uid=f"PRODUCT-LIVE-NFC-{suffix}",
+        )
+        return product, bag
+
+    def setUp(self):
+        clock_patch = patch(
+            "simulation.services.timezone.now",
+            return_value=self.started_at,
+        )
+        self.mock_clock = clock_patch.start()
+        self.addCleanup(clock_patch.stop)
+
+    def ensure(self, bag):
+        return self.client.post(
+            reverse(
+                "ensure-live-session",
+                kwargs={"public_token": bag.public_token},
+            )
+        )
+
+    def assert_bad_mapping(self, bag):
+        response = self.ensure(bag)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(set(response.data), {"detail"})
+        self.assertIsInstance(response.data["detail"], str)
+        self.assertTrue(response.data["detail"])
+
+    def test_configured_hot_car_scenario_is_created_with_existing_response_schema(self):
+        response = self.ensure(self.bag_a)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            set(response.data),
+            {
+                "session_id",
+                "status",
+                "created",
+                "polling_interval_seconds",
+                "started_at",
+                "scheduled_end_at",
+            },
+        )
+        self.assertIs(response.data["created"], True)
+        session = MeasurementSession.objects.get(pk=response.data["session_id"])
+        self.assertEqual(session.scenario, self.hot_car_scenario)
+        self.assertEqual(session.bag, self.bag_a)
+
+    def test_two_synthetic_products_keep_independent_running_scenarios(self):
+        response_a = self.ensure(self.bag_a)
+        response_b = self.ensure(self.bag_b)
+
+        self.assertEqual(response_a.status_code, 200)
+        self.assertEqual(response_b.status_code, 200)
+        session_a = MeasurementSession.objects.get(pk=response_a.data["session_id"])
+        session_b = MeasurementSession.objects.get(pk=response_b.data["session_id"])
+        self.assertNotEqual(session_a.pk, session_b.pk)
+        self.assertEqual(session_a.scenario, self.hot_car_scenario)
+        self.assertEqual(session_b.scenario, self.alternate_scenario)
+        self.assertEqual(session_a.status, MeasurementSession.Status.RUNNING)
+        self.assertEqual(session_b.status, MeasurementSession.Status.RUNNING)
+
+    def test_existing_running_session_is_reused_before_mapping_resolution(self):
+        first = self.ensure(self.bag_a)
+        self.product_a.demo_live_scenario_code = "UNKNOWN_AFTER_SESSION_STARTED"
+        self.product_a.save(update_fields=["demo_live_scenario_code"])
+
+        second = self.ensure(self.bag_a)
+
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data["session_id"], first.data["session_id"])
+        self.assertIs(second.data["created"], False)
+        self.assertEqual(
+            MeasurementSession.objects.filter(bag=self.bag_a).count(),
+            1,
+        )
+
+    def test_none_and_blank_mappings_return_controlled_400(self):
+        for suffix, mapping in (("NONE", None), ("BLANK", "   ")):
+            with self.subTest(mapping=mapping):
+                _product, bag = self.create_product_and_bag(suffix, mapping)
+                self.assert_bad_mapping(bag)
+
+    def test_unknown_mapping_returns_controlled_400(self):
+        _product, bag = self.create_product_and_bag("UNKNOWN", "UNKNOWN_LIVE")
+        self.assert_bad_mapping(bag)
+
+    def test_inactive_live_mapping_returns_controlled_400(self):
+        _product, bag = self.create_product_and_bag(
+            "INACTIVE",
+            self.inactive_scenario.code,
+        )
+        self.assert_bad_mapping(bag)
+
+    def test_history_mapping_returns_controlled_400(self):
+        _product, bag = self.create_product_and_bag(
+            "HISTORY",
+            self.history_scenario.code,
+        )
+        self.assert_bad_mapping(bag)
+
+    def test_selection_does_not_depend_on_product_identity_or_bag_token(self):
+        self.product_a.brand = "Renamed Brand"
+        self.product_a.model_name = "Renamed Model"
+        self.product_a.save(update_fields=["brand", "model_name"])
+
+        response = self.ensure(self.bag_a)
+
+        self.assertEqual(response.status_code, 200)
+        session = MeasurementSession.objects.get(pk=response.data["session_id"])
+        self.assertEqual(session.scenario.code, "HOT_CAR_LIVE")

@@ -22,7 +22,10 @@ def ensure_live_session_view(request, public_token):
     except Bag.DoesNotExist:
         return Response({"detail": "존재하지 않는 가방입니다."}, status=http_status.HTTP_404_NOT_FOUND)
 
-    session, created = ensure_live_session(bag)
+    try:
+        session, created = ensure_live_session(bag)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
     serializer = LiveSessionSerializer(session, context={"created": created})
     return Response(serializer.data)
 

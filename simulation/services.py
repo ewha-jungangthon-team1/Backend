@@ -18,15 +18,6 @@ DEMO_REAL_SECONDS = 180
 # 프론트가 latest-reading을 폴링하는 권장 주기(초). API 2 응답에 그대로 실어보낸다.
 POLLING_INTERVAL_SECONDS = 2
 
-# 시연 시나리오 자동 선택 순서 (라운드로빈)
-SCENARIO_ROTATION_ORDER = [
-    "NORMAL",
-    "OVERLOAD",
-    "HIGH_TEMPERATURE",
-    "HIGH_HUMIDITY",
-    "COMPOSITE_RISK",
-]
-
 # SensorReading에서 config 기반으로 계산해야 하는 필드 목록
 # → 필드 하나 추가/삭제하고 싶으면 여기 + FIELD_PRECISION만 고치면 됨
 FIELD_NAMES = [
@@ -51,28 +42,6 @@ FIELD_MIN_CLAMP = {"body_deformation_ratio": 0}
 
 # start/end 패턴일 때 더할 노이즈 크기 (구간 대비 비율)
 NOISE_RATIO = 0.02
-
-
-# ============================================================
-# 시나리오 선택
-# ============================================================
-
-def pick_next_scenario_type(bag):
-    """이 가방이 최근에 쓴 LIVE 시나리오의 다음 순서를 라운드로빈으로 고른다."""
-    last_session = (
-        MeasurementSession.objects.filter(
-            bag=bag, purpose=MeasurementSession.Purpose.LIVE
-        )
-        .exclude(scenario__isnull=True)
-        .order_by("-started_at")
-        .first()
-    )
-    if not last_session or last_session.scenario.scenario_type not in SCENARIO_ROTATION_ORDER:
-        return SCENARIO_ROTATION_ORDER[0]
-
-    idx = SCENARIO_ROTATION_ORDER.index(last_session.scenario.scenario_type)
-    next_idx = (idx + 1) % len(SCENARIO_ROTATION_ORDER)
-    return SCENARIO_ROTATION_ORDER[next_idx]
 
 
 # ============================================================
@@ -250,11 +219,30 @@ def close_session(session, ended_at=None):
     return session
 
 
+def resolve_demo_live_scenario(product_model):
+    """상품에 설정된 활성 LIVE 데모 시나리오를 반환한다."""
+    scenario_code = product_model.demo_live_scenario_code
+    if not scenario_code or not scenario_code.strip():
+        raise ValueError("이 상품에는 LIVE 데모 시나리오가 설정되어 있지 않습니다.")
+
+    try:
+        scenario = SimulationScenario.objects.get(code=scenario_code.strip())
+    except SimulationScenario.DoesNotExist as exc:
+        raise ValueError("설정된 LIVE 데모 시나리오를 찾을 수 없습니다.") from exc
+
+    if not scenario.is_active:
+        raise ValueError("설정된 LIVE 데모 시나리오가 비활성 상태입니다.")
+    if scenario.mode != SimulationScenario.Mode.LIVE:
+        raise ValueError("설정된 데모 시나리오는 LIVE 모드여야 합니다.")
+
+    return scenario
+
+
 @transaction.atomic
 def ensure_live_session(bag):
     """
     RUNNING 상태인 LIVE 세션이 있으면 그대로 반환.
-    없으면 다음 시나리오(라운드로빈)로 새 세션을 만든다 (데이터는 아직 안 채워짐).
+    없으면 상품에 설정된 데모 LIVE 시나리오로 새 세션을 만든다 (데이터는 아직 안 채워짐).
 
     select_for_update()로 새로고침 연타 같은 동시 요청에도 세션이 중복 생성되지 않도록 막는다.
     ※ SQLite에서는 로우 단위가 아니라 DB 전체 잠금으로 동작하지만, 데모 규모에선 문제 없음.
@@ -277,9 +265,8 @@ def ensure_live_session(bag):
         existing.ended_at = timezone.now()
         existing.save(update_fields=["status", "ended_at"])
 
-    scenario_type = pick_next_scenario_type(bag)
-    scenario_code = f"{scenario_type}_LIVE"  # fixture의 code 규칙과 동일 (예: OVERLOAD_LIVE)
-    session, _total_count = create_simulation_session(bag, scenario_code)
+    scenario = resolve_demo_live_scenario(bag.product_model)
+    session, _total_count = create_simulation_session(bag, scenario.code)
     return session, True
 
 

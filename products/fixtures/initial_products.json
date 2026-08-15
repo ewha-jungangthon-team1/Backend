@@ -6,6 +6,7 @@
       "brand": "Central Bag Co.",
       "model_name": "Voyager Tote",
       "material": "Full-grain Leather",
+      "demo_live_scenario_code": "HOT_CAR_LIVE",
       "care_guideline": {
         "avoid_moisture": true,
         "max_load_kg": 5.5,
