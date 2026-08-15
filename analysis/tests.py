@@ -3576,6 +3576,7 @@ class HistoryAIContextTests(HistoryAITestCase):
             {
                 "period",
                 "metrics",
+                "material_moisture_summary",
                 "severity",
                 "active_rules",
                 "unavailable_rules",
@@ -3644,6 +3645,53 @@ class HistoryAIContextTests(HistoryAITestCase):
         self.assertNotIn("daily_series", context["metrics"])
         self.assertNotIn("reading_count", context["metrics"])
         self.assertNotIn("presentation", json.dumps(context))
+
+    def test_projects_compact_numeric_material_moisture_summary(self):
+        report = self.create_normal_report()
+        report.metrics["daily_series"] = [
+            {
+                "date": "2026-08-04",
+                "presentation": {"material_moisture_percent": 20.04},
+            },
+            {
+                "date": "2026-08-05",
+                "presentation": {"material_moisture_percent": 19.51},
+            },
+            {
+                "date": "2026-08-10",
+                "presentation": {"material_moisture_percent": 16.99},
+            },
+        ]
+
+        with self.assertNumQueries(0):
+            context = build_history_ai_context(report)
+
+        self.assertEqual(
+            context["material_moisture_summary"],
+            {
+                "first_percent": 20.04,
+                "latest_percent": 16.99,
+                "change_percentage_points": -3.05,
+                "trend": "DECREASED",
+            },
+        )
+        self.assertNotIn("daily_series", context["metrics"])
+        self.assertNotIn("presentation", json.dumps(context))
+
+    def test_all_null_material_moisture_has_no_invented_summary(self):
+        report = self.create_normal_report()
+        report.metrics["daily_series"] = [
+            {
+                "date": f"2026-08-{day:02d}",
+                "presentation": {"material_moisture_percent": None},
+            }
+            for day in range(4, 11)
+        ]
+
+        context = build_history_ai_context(report)
+
+        self.assertIsNone(context["material_moisture_summary"])
+        self.assertNotIn("daily_series", context["metrics"])
 
     def test_excludes_live_presentation_and_live_states_from_ai_context(self):
         report = self.create_normal_report()
@@ -4017,7 +4065,12 @@ class HistoryAIFallbackTests(HistoryAITestCase):
 
         self.assertEqual(
             fallback["weekly_summary"],
-            "최근 7일 동안 확인 가능한 지표에서는 관리 기준을 초과한 기록이 없었어요.",
+            "최근 7일은 확인 가능한 지표에서 관리 기준을 넘은 기록 없이 "
+            "전반적으로 안정적이었어요.",
+        )
+        self.assertEqual(
+            fallback["care_comment"],
+            "현재 특별히 주의가 필요한 상태는 아니에요.",
         )
         self.assertEqual(fallback["priority_actions"], [])
 
@@ -4090,8 +4143,40 @@ class HistoryAIFallbackTests(HistoryAITestCase):
 
         self.assertEqual(
             fallback["pattern_insight"],
-            "이전 기록이 아직 충분하지 않아 이번 기간의 변화 비교를 제공하지 않았어요.",
+            "이전 기록이 아직 충분하지 않아 이번에는 기간별 변화를 비교하기 어려워요.",
         )
+
+    def test_fallback_uses_ui_terminology_and_polite_tone(self):
+        report = self.create_normal_report()
+        report.active_rules = [RuleCode.HIGH_HUMIDITY.value]
+        report.metrics["humidity"]["high_humidity_detected_days"] = 2
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertIn("내부 습도", fallback["weekly_summary"])
+        self.assertTrue(fallback["weekly_summary"].endswith("필요해요."))
+        self.assertLessEqual(len(fallback["priority_actions"]), 2)
+
+    def test_fallback_uses_moisture_contact_day_terminology(self):
+        report = self.create_normal_report()
+        self.set_comparison_metrics(
+            report,
+            {
+                "moisture": {
+                    "detected_days": {
+                        "current": 2,
+                        "previous": 1,
+                        "change": 1,
+                        "change_percent": 100,
+                    }
+                }
+            },
+        )
+
+        fallback = build_history_ai_fallback(report)
+
+        self.assertIn("수분 접촉일", fallback["pattern_insight"])
+        self.assertNotIn("수분 노출일", fallback["pattern_insight"])
 
     def test_zero_to_positive_change_does_not_invent_one_hundred_percent(self):
         report = self.create_normal_report()
@@ -4401,6 +4486,56 @@ class HistoryAIGenerationAdapterTests(TestCase):
         self.assertIn("0~2개의 문자열", HISTORY_AI_DEVELOPER_INSTRUCTION)
         self.assertIn("비슷한 행동", HISTORY_AI_DEVELOPER_INSTRUCTION)
         self.assertIn("반복하지 말고", HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_separates_mobile_ui_field_roles(self):
+        self.assertIn("각 field의 역할을 분리", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn(
+            "weekly_summary는 현재 최근 7일",
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
+        self.assertIn(
+            "pattern_insight는 이전 7일",
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
+        self.assertIn(
+            'care_comment는 Report 화면의 "주의할 점"',
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
+        self.assertIn('"~어요", "~해 주세요"', HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_requires_consistent_user_facing_terminology(self):
+        for term in (
+            "하중",
+            "과부하",
+            "하중 편중",
+            "형태 편차",
+            "내부 습도",
+            "소재 수분도",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_prohibits_material_moisture_threshold_hallucination(self):
+        self.assertIn(
+            "material_moisture_summary가 null",
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
+        self.assertIn(
+            "numeric 관리 threshold가 없으므로",
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
+        self.assertIn('"정상 범위", "안전 범위"', HISTORY_AI_DEVELOPER_INSTRUCTION)
+
+    def test_prompt_requires_one_non_null_material_moisture_mention(self):
+        self.assertIn(
+            "non-null이면 weekly_summary 또는 pattern_insight 중 정확히 한 field",
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
+        self.assertIn("두 field에서 반복하지 마세요", HISTORY_AI_DEVELOPER_INSTRUCTION)
+        self.assertIn(
+            "first_percent, latest_percent, change_percentage_points, trend",
+            HISTORY_AI_DEVELOPER_INSTRUCTION,
+        )
 
     def test_calls_responses_create_exactly_once(self):
         client = self.build_client()

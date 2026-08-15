@@ -17,11 +17,11 @@ _RULE_FACTS = {
     ),
     RuleCode.HIGH_HUMIDITY.value: (
         ("humidity", "high_humidity_detected_days"),
-        "습도 기준을 초과한 날이 {days}일",
+        "내부 습도 기준을 초과한 날이 {days}일",
     ),
     RuleCode.MOISTURE.value: (
         ("moisture", "detected_days"),
-        "수분 노출이 감지된 날이 {days}일",
+        "수분 접촉이 감지된 날이 {days}일",
     ),
     RuleCode.LOAD_BIAS.value: (
         ("load_bias", "biased_days"),
@@ -29,7 +29,7 @@ _RULE_FACTS = {
     ),
     RuleCode.DEFORMATION.value: (
         ("deformation", "deformation_detected_days"),
-        "변형 기준을 초과한 날이 {days}일",
+        "형태 편차 기준을 초과한 날이 {days}일",
     ),
 }
 
@@ -83,11 +83,17 @@ def _build_weekly_summary(report):
         detected_days_decimal = _as_decimal(detected_days)
         if detected_days_decimal is not None:
             fact = template.format(days=int(detected_days_decimal))
-            return f"최근 7일 동안 {fact} 확인되어 관리가 필요해요."
+            return f"최근 7일은 {fact} 확인됐어요. 관련 관리가 필요해요."
 
     if report.severity == Severity.WARNING.value or active_rules:
-        return "최근 7일 동안 관리 기준을 벗어난 항목이 확인되어 관리가 필요해요."
-    return "최근 7일 동안 확인 가능한 지표에서는 관리 기준을 초과한 기록이 없었어요."
+        return (
+            "최근 7일은 관리 기준을 벗어난 항목이 확인됐어요. "
+            "현재 상태에 맞는 관리가 필요해요."
+        )
+    return (
+        "최근 7일은 확인 가능한 지표에서 관리 기준을 넘은 기록 없이 "
+        "전반적으로 안정적이었어요."
+    )
 
 
 def _care_actions(report):
@@ -110,7 +116,7 @@ def _build_care_comment(report):
 
     if report.active_rules:
         return "관리 기준을 벗어난 항목을 확인하고 현재 상태를 점검해 주세요."
-    return "현재 확인된 관리 기준 초과가 없어 별도의 집중 관리 항목은 없어요."
+    return "현재 특별히 주의가 필요한 상태는 아니에요."
 
 
 def _build_priority_actions(report):
@@ -217,13 +223,13 @@ def _build_available_pattern(comparison_metrics):
             comparison_metrics,
             "deformation",
             "latest_percent",
-            "최근 변형률",
+            "최근 형태 편차",
         ),
         _day_count_pattern(
             comparison_metrics,
             "moisture",
             "detected_days",
-            "수분 노출일",
+            "수분 접촉일",
         ),
     )
     selected = [candidate for candidate in candidates if candidate][:2]
@@ -238,8 +244,8 @@ def _build_pattern_insight(report):
         return _build_available_pattern(_mapping(comparison.get("metrics")))
 
     if comparison.get("reason") == "NO_PREVIOUS_PERIOD":
-        return "이전 기록이 아직 충분하지 않아 이번 기간의 변화 비교를 제공하지 않았어요."
-    return "이전 기간과 안전하게 비교할 수 없어 이번 기간의 변화 비교를 제공하지 않았어요."
+        return "이전 기록이 아직 충분하지 않아 이번에는 기간별 변화를 비교하기 어려워요."
+    return "이전 기간과 안전하게 비교하기 어려워 이번에는 현재 상태만 확인해 주세요."
 
 
 def build_history_ai_fallback(report):

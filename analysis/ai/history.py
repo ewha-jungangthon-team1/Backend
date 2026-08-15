@@ -1,6 +1,6 @@
 from collections.abc import Mapping
 from copy import deepcopy
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from enum import Enum
 
 from django.utils import timezone
@@ -70,6 +70,60 @@ def _select_mapping_fields(snapshot, field_names):
     }
 
 
+def _as_finite_decimal(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return decimal_value if decimal_value.is_finite() else None
+
+
+def _build_material_moisture_summary(metrics):
+    if not isinstance(metrics, Mapping):
+        return None
+    daily_series = metrics.get("daily_series")
+    if not isinstance(daily_series, list):
+        return None
+
+    values = []
+    for item in daily_series:
+        if not isinstance(item, Mapping):
+            continue
+        presentation = item.get("presentation")
+        if not isinstance(presentation, Mapping):
+            continue
+        value = _as_finite_decimal(
+            presentation.get("material_moisture_percent")
+        )
+        if value is not None:
+            values.append(value)
+
+    if not values:
+        return None
+
+    first = values[0]
+    latest = values[-1]
+    change = (latest - first).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_HALF_UP,
+    )
+    if change > 0:
+        trend = "INCREASED"
+    elif change < 0:
+        trend = "DECREASED"
+    else:
+        trend = "STABLE"
+
+    return {
+        "first_percent": float(first),
+        "latest_percent": float(latest),
+        "change_percentage_points": float(change),
+        "trend": trend,
+    }
+
+
 def build_history_ai_context(report):
     if report is None:
         raise ValueError("report is required.")
@@ -84,6 +138,9 @@ def build_history_ai_context(report):
         "metrics": _select_mapping_fields(
             report.metrics,
             _HISTORY_METRIC_DOMAINS,
+        ),
+        "material_moisture_summary": _build_material_moisture_summary(
+            report.metrics
         ),
         "severity": _json_safe_copy(report.severity),
         "active_rules": _json_safe_copy(report.active_rules),
