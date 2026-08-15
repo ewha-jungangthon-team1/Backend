@@ -26,6 +26,7 @@ FIELD_NAMES = [
     "temperature",
     "load_bias",
     "body_deformation_ratio",
+    "material_moisture_percent",
 ]
 
 # 필드별 반올림 자릿수
@@ -35,10 +36,16 @@ FIELD_PRECISION = {
     "temperature": 2,
     "load_bias": 4,
     "body_deformation_ratio": 4,
+    "material_moisture_percent": 2,
 }
 
 # 0 밑으로 내려가면 안 되는 필드 (모델의 MinValueValidator(0)과 맞춤)
-FIELD_MIN_CLAMP = {"body_deformation_ratio": 0}
+FIELD_MIN_CLAMP = {
+    "body_deformation_ratio": 0,
+    "material_moisture_percent": 0,
+}
+FIELD_MAX_CLAMP = {"material_moisture_percent": 100}
+OPTIONAL_FIELD_NAMES = {"material_moisture_percent"}
 
 # start/end 패턴일 때 더할 노이즈 크기 (구간 대비 비율)
 NOISE_RATIO = 0.02
@@ -128,9 +135,16 @@ def generate_single_reading(session, sequence, total_count):
 
     values = {}
     for field in FIELD_NAMES:
-        raw_value = compute_field_value(config.get(field), progress, rng)
+        field_config = config.get(field)
+        if field in OPTIONAL_FIELD_NAMES and field_config is None:
+            values[field] = None
+            continue
+
+        raw_value = compute_field_value(field_config, progress, rng)
         if field in FIELD_MIN_CLAMP:
             raw_value = max(raw_value, FIELD_MIN_CLAMP[field])
+        if field in FIELD_MAX_CLAMP:
+            raw_value = min(raw_value, FIELD_MAX_CLAMP[field])
         values[field] = round(raw_value, FIELD_PRECISION[field])
 
     return SensorReading.objects.create(
@@ -307,13 +321,31 @@ def get_latest_reading(session):
     )
 
     if previous is not None:
-        display = {
-            field: round(_lerp(getattr(previous, field), getattr(latest, field), local_ratio), FIELD_PRECISION[field])
-            for field in FIELD_NAMES
-        }
+        display = {}
+        for field in FIELD_NAMES:
+            previous_value = getattr(previous, field)
+            latest_value = getattr(latest, field)
+            if previous_value is None and latest_value is None:
+                display[field] = None
+            elif previous_value is None:
+                display[field] = float(latest_value)
+            elif latest_value is None:
+                display[field] = float(previous_value)
+            else:
+                display[field] = round(
+                    _lerp(previous_value, latest_value, local_ratio),
+                    FIELD_PRECISION[field],
+                )
         moisture_detected = bool(previous.moisture_detected or latest.moisture_detected)
     else:
-        display = {field: float(getattr(latest, field)) for field in FIELD_NAMES}
+        display = {
+            field: (
+                float(getattr(latest, field))
+                if getattr(latest, field) is not None
+                else None
+            )
+            for field in FIELD_NAMES
+        }
         moisture_detected = latest.moisture_detected
 
     return {

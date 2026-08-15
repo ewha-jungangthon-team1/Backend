@@ -35,6 +35,16 @@ class SensorReading(models.Model):
     session = models.ForeignKey(MeasurementSession, on_delete=models.CASCADE, related_name="readings")
     strap_load = models.DecimalField(max_digits=6, decimal_places=2)
     humidity = models.DecimalField(max_digits=5, decimal_places=2)
+    material_moisture_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(0),
+            MaxValueValidator(100),
+        ],
+    )
     moisture_detected = models.BooleanField(default=False)
     temperature = models.DecimalField(max_digits=5, decimal_places=2)
     measured_at = models.DateTimeField()

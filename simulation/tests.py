@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta
+from decimal import Decimal
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
@@ -13,7 +14,12 @@ from measurements.models import MeasurementSession
 from products.models import Bag, ProductModel
 
 from .models import SimulationScenario
-from .services import DEMO_REAL_SECONDS, POLLING_INTERVAL_SECONDS
+from .services import (
+    DEMO_REAL_SECONDS,
+    POLLING_INTERVAL_SECONDS,
+    generate_single_reading,
+    get_latest_reading,
+)
 
 
 class LiveResponseContractTests(APITestCase):
@@ -124,6 +130,7 @@ class LiveResponseContractTests(APITestCase):
                 "temperature",
                 "load_bias",
                 "body_deformation_ratio",
+                "material_moisture_percent",
             },
         )
         self.assertNotIn("polling_interval_seconds", payload)
@@ -139,6 +146,7 @@ class LiveResponseContractTests(APITestCase):
             self.assertIsInstance(payload[field_name], (int, float))
             self.assertNotIsInstance(payload[field_name], bool)
         self.assertIsInstance(payload["moisture_detected"], bool)
+        self.assertIsNone(payload["material_moisture_percent"])
         self.assertIsInstance(payload["is_finished"], bool)
 
         reading = MeasurementSession.objects.get(
@@ -416,3 +424,129 @@ class ProductSpecificLiveScenarioTests(APITestCase):
         self.assertEqual(response.status_code, 200)
         session = MeasurementSession.objects.get(pk=response.data["session_id"])
         self.assertEqual(session.scenario.code, "HOT_CAR_LIVE")
+
+
+class MaterialMoistureGenerationTests(APITestCase):
+    @classmethod
+    def setUpTestData(cls):
+        owner = get_user_model().objects.create_user(
+            username="material-moisture-generation-owner",
+            password="test-password",
+        )
+        product_model = ProductModel.objects.create(
+            brand="Test Brand",
+            model_name="Material Moisture Generation Bag",
+            material="Leather",
+            care_guideline={},
+        )
+        cls.bag = Bag.objects.create(
+            product_model=product_model,
+            owner=owner,
+            nfc_uid="MATERIAL-MOISTURE-GENERATION-NFC",
+        )
+        cls.started_at = datetime(
+            2026,
+            8,
+            14,
+            12,
+            tzinfo=ZoneInfo("Asia/Seoul"),
+        )
+
+    def create_session(self, suffix, *, material_moisture_config=None):
+        config = {
+            "strap_load": {"min": 2.5, "max": 4.0},
+            "humidity": {"min": 40, "max": 55},
+            "temperature": {"min": 22, "max": 26},
+            "load_bias": {"min": -0.1, "max": 0.1},
+            "body_deformation_ratio": {"min": 0.005, "max": 0.012},
+            "moisture_event": {"enabled": True, "trigger_at_ratio": 0.5},
+        }
+        if material_moisture_config is not None:
+            config["material_moisture_percent"] = material_moisture_config
+
+        scenario = SimulationScenario.objects.create(
+            code=f"MATERIAL_MOISTURE_{suffix}",
+            name=f"Material Moisture {suffix}",
+            scenario_type=SimulationScenario.ScenarioType.HIGH_HUMIDITY,
+            mode=SimulationScenario.Mode.LIVE,
+            logical_duration_seconds=20,
+            sample_interval_seconds=10,
+            config=config,
+        )
+        return MeasurementSession.objects.create(
+            bag=self.bag,
+            scenario=scenario,
+            purpose=MeasurementSession.Purpose.LIVE,
+            seed=12345,
+            started_at=self.started_at,
+            status=MeasurementSession.Status.RUNNING,
+        )
+
+    def get_interpolated_reading(self, session, latest, local_ratio=0.5):
+        with (
+            patch(
+                "simulation.services.calculate_progress",
+                return_value=(latest.sequence, 2, local_ratio),
+            ),
+            patch(
+                "simulation.services.ensure_readings_up_to_now",
+                return_value=latest,
+            ),
+            patch(
+                "simulation.services.calculate_overall_progress_ratio",
+                return_value=0.5,
+            ),
+        ):
+            return get_latest_reading(session)
+
+    def test_generates_numeric_material_moisture_from_existing_config_format(self):
+        session = self.create_session(
+            "CONFIGURED",
+            material_moisture_config={"min": 42, "max": 42},
+        )
+
+        reading = generate_single_reading(session, sequence=0, total_count=2)
+        reading.refresh_from_db()
+
+        self.assertEqual(
+            reading.material_moisture_percent,
+            Decimal("42.00"),
+        )
+
+    def test_missing_config_stores_null_and_preserves_moisture_event(self):
+        session = self.create_session("UNSUPPORTED")
+
+        reading = generate_single_reading(session, sequence=1, total_count=2)
+        reading.refresh_from_db()
+
+        self.assertIsNone(reading.material_moisture_percent)
+        self.assertIs(reading.moisture_detected, True)
+
+    def test_interpolates_numeric_material_moisture(self):
+        session = self.create_session(
+            "INTERPOLATED",
+            material_moisture_config={"start": 20, "end": 60},
+        )
+        previous = generate_single_reading(session, sequence=0, total_count=2)
+        latest = generate_single_reading(session, sequence=1, total_count=2)
+
+        result = self.get_interpolated_reading(session, latest)
+
+        expected = round(
+            (
+                float(previous.material_moisture_percent)
+                + float(latest.material_moisture_percent)
+            )
+            / 2,
+            2,
+        )
+        self.assertEqual(result["material_moisture_percent"], expected)
+
+    def test_unsupported_interpolation_keeps_null(self):
+        session = self.create_session("NULL_INTERPOLATION")
+        generate_single_reading(session, sequence=0, total_count=2)
+        latest = generate_single_reading(session, sequence=1, total_count=2)
+
+        result = self.get_interpolated_reading(session, latest)
+
+        self.assertIsNone(result["material_moisture_percent"])
