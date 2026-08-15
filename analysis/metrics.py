@@ -2,6 +2,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 from django.utils import timezone
 
+from measurements.home import build_sensor_presentation_values
 from measurements.models import MeasurementSession
 
 
@@ -54,6 +55,14 @@ def build_history_daily_series(session):
             reading.body_deformation_ratio,
             4,
         )
+        presentation = build_sensor_presentation_values(
+            strap_load=reading.strap_load,
+            load_bias=reading.load_bias,
+            body_deformation_ratio=reading.body_deformation_ratio,
+            temperature=reading.temperature,
+            humidity=reading.humidity,
+            material_moisture_percent=reading.material_moisture_percent,
+        )
         daily_series.append(
             {
                 "date": timezone.localdate(
@@ -65,6 +74,7 @@ def build_history_daily_series(session):
                     _quantize_decimal(deformation_ratio * 100, 2)
                 ),
                 "moisture_detected": reading.moisture_detected,
+                "presentation": presentation,
             }
         )
 

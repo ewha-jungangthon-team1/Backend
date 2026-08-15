@@ -156,6 +156,11 @@ class SensorReadingMaterialMoistureTests(TestCase):
             sequence=0,
         )
 
+    def test_measurement_session_include_in_report_defaults_true(self):
+        self.session.refresh_from_db()
+
+        self.assertIs(self.session.include_in_report, True)
+
     def test_stores_numeric_material_moisture_percentage(self):
         reading = self.build_reading(Decimal("42.50"))
         reading.full_clean()

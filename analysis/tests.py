@@ -13,6 +13,7 @@ from django.urls import reverse
 from rest_framework.renderers import JSONRenderer
 from rest_framework.test import APIClient
 
+from measurements.home import build_sensor_presentation_values
 from measurements.models import MeasurementSession, SensorReading
 from products.models import Bag, ProductModel
 from simulation.models import SimulationScenario
@@ -164,6 +165,7 @@ class HistoryAnalysisTestCase(TestCase):
         moisture_detected=False,
         load_bias="0.1000",
         body_deformation_ratio="0.0100",
+        material_moisture_percent=None,
     ):
         for sequence in range(7):
             SensorReading.objects.create(
@@ -175,6 +177,11 @@ class HistoryAnalysisTestCase(TestCase):
                 measured_at=session.started_at + timedelta(days=sequence),
                 load_bias=Decimal(load_bias),
                 body_deformation_ratio=Decimal(body_deformation_ratio),
+                material_moisture_percent=(
+                    Decimal(material_moisture_percent)
+                    if material_moisture_percent is not None
+                    else None
+                ),
                 sequence=sequence,
             )
 
@@ -507,7 +514,11 @@ class HistoryDailySeriesTests(HistoryAnalysisTestCase):
     def test_rounds_numeric_fields_and_preserves_boolean(self):
         reading = Mock(
             strap_load=Decimal("3.026"),
+            humidity=Decimal("51.234"),
+            temperature=Decimal("24.567"),
+            load_bias=Decimal("0.3600"),
             body_deformation_ratio=Decimal("0.02504"),
+            material_moisture_percent=None,
             moisture_detected=True,
             measured_at=datetime(2026, 8, 4, 9, tzinfo=ZoneInfo("Asia/Seoul")),
         )
@@ -524,6 +535,16 @@ class HistoryDailySeriesTests(HistoryAnalysisTestCase):
                 "deformation_ratio": 0.025,
                 "deformation_percent": 2.5,
                 "moisture_detected": True,
+                "presentation": {
+                    "total_load_kg": 3.03,
+                    "bias_magnitude_percent": 36.0,
+                    "left_load_percent": 32.0,
+                    "right_load_percent": 68.0,
+                    "shape_deviation_percent": 2.5,
+                    "temperature_c": 24.57,
+                    "internal_humidity_percent": 51.23,
+                    "material_moisture_percent": None,
+                },
             },
         )
         self.assertIsInstance(daily_series[0]["load_kg"], float)
@@ -531,6 +552,76 @@ class HistoryDailySeriesTests(HistoryAnalysisTestCase):
         self.assertIsInstance(daily_series[0]["deformation_percent"], float)
         self.assertIs(daily_series[0]["moisture_detected"], True)
         session.readings.order_by.assert_called_once_with("sequence")
+
+    def test_uses_shared_presentation_for_signed_bias_and_optional_moisture(self):
+        session = self.create_session()
+        readings = [
+            SensorReading.objects.create(
+                session=session,
+                strap_load=Decimal("3.40"),
+                humidity=Decimal("51.00"),
+                temperature=Decimal("24.00"),
+                moisture_detected=False,
+                measured_at=self.started_at,
+                load_bias=Decimal("0.3600"),
+                body_deformation_ratio=Decimal("0.0070"),
+                material_moisture_percent=None,
+                sequence=0,
+            ),
+            SensorReading.objects.create(
+                session=session,
+                strap_load=Decimal("2.80"),
+                humidity=Decimal("55.50"),
+                temperature=Decimal("25.25"),
+                moisture_detected=False,
+                measured_at=self.started_at + timedelta(days=1),
+                load_bias=Decimal("-0.2000"),
+                body_deformation_ratio=Decimal("0.0125"),
+                material_moisture_percent=Decimal("42.50"),
+                sequence=1,
+            ),
+        ]
+
+        daily_series = build_history_daily_series(session)
+
+        for item, reading in zip(daily_series, readings, strict=True):
+            expected = build_sensor_presentation_values(
+                strap_load=reading.strap_load,
+                load_bias=reading.load_bias,
+                body_deformation_ratio=reading.body_deformation_ratio,
+                temperature=reading.temperature,
+                humidity=reading.humidity,
+                material_moisture_percent=reading.material_moisture_percent,
+            )
+            self.assertEqual(item["presentation"], expected)
+            self.assertEqual(
+                item["presentation"]["left_load_percent"]
+                + item["presentation"]["right_load_percent"],
+                100,
+            )
+            self.assertTrue(
+                {
+                    "date",
+                    "load_kg",
+                    "deformation_ratio",
+                    "deformation_percent",
+                    "moisture_detected",
+                    "presentation",
+                }
+                <= item.keys()
+            )
+
+        self.assertEqual(daily_series[0]["presentation"]["left_load_percent"], 32)
+        self.assertEqual(daily_series[0]["presentation"]["right_load_percent"], 68)
+        self.assertIsNone(
+            daily_series[0]["presentation"]["material_moisture_percent"]
+        )
+        self.assertEqual(daily_series[1]["presentation"]["left_load_percent"], 60)
+        self.assertEqual(daily_series[1]["presentation"]["right_load_percent"], 40)
+        self.assertEqual(
+            daily_series[1]["presentation"]["material_moisture_percent"],
+            42.5,
+        )
 
     def test_result_is_json_renderable(self):
         session = self.create_session()
@@ -670,6 +761,37 @@ class PreviousHistorySessionSelectorTests(HistoryAnalysisTestCase):
             result.reason,
             ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
         )
+
+    def test_excludes_previous_session_not_included_in_reports(self):
+        previous = self.create_period(started_at=self.started_at)
+        previous.include_in_report = False
+        previous.save(update_fields=["include_in_report"])
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertIsNone(result.previous_session)
+        self.assertEqual(
+            result.reason,
+            ComparisonUnavailableReason.NO_PREVIOUS_PERIOD,
+        )
+
+    def test_selects_eligible_previous_when_ineligible_candidate_also_matches(self):
+        ineligible = self.create_period(started_at=self.started_at)
+        ineligible.include_in_report = False
+        ineligible.save(update_fields=["include_in_report"])
+        eligible = self.create_period(started_at=self.started_at)
+        current = self.create_period(
+            started_at=self.started_at + timedelta(days=7)
+        )
+
+        result = find_previous_history_session(current)
+
+        self.assertTrue(result.is_available)
+        self.assertEqual(result.previous_session, eligible)
+        self.assertIsNone(result.reason)
 
     def test_returns_no_previous_period_without_exact_candidate(self):
         current = self.create_period(started_at=self.started_at)
@@ -1837,6 +1959,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
                 "period",
                 "display_period",
                 "metrics",
+                "charts",
                 "chart_references",
                 "comparison",
                 "ai_result",
@@ -1895,6 +2018,37 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
         self.assertEqual(report.metrics, original_metrics)
         self.assertEqual(report.comparison, original_comparison)
         self.assertEqual(data["ai_result"], report.ai_result)
+        self.assertEqual(len(data["charts"]["load"]), 7)
+        self.assertEqual(len(data["charts"]["shape"]), 7)
+        self.assertEqual(len(data["charts"]["environment"]), 7)
+        self.assertEqual(
+            data["charts"]["load"][0],
+            {
+                "date": "2026-07-28",
+                "display_date": "2026-08-07",
+                "total_load_kg": 4.0,
+                "left_load_percent": 55.0,
+                "right_load_percent": 45.0,
+            },
+        )
+        self.assertEqual(
+            data["charts"]["shape"][0],
+            {
+                "date": "2026-07-28",
+                "display_date": "2026-08-07",
+                "shape_deviation_percent": 0.0,
+            },
+        )
+        self.assertEqual(
+            data["charts"]["environment"][0],
+            {
+                "date": "2026-07-28",
+                "display_date": "2026-08-07",
+                "temperature_c": 20.0,
+                "internal_humidity_percent": 40.0,
+                "material_moisture_percent": None,
+            },
+        )
         self.assertEqual(
             data["chart_references"],
             {
@@ -2015,6 +2169,39 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
             },
         )
 
+    def test_numeric_material_moisture_uses_same_chart_schema(self):
+        session = self.create_session()
+        self.add_uniform_readings(
+            session,
+            material_moisture_percent="42.50",
+        )
+        report, _created = analyze_history_session(session)
+
+        data = AnalysisReportSerializer(report).data
+
+        self.assertEqual(
+            set(data["charts"]),
+            {"load", "shape", "environment"},
+        )
+        self.assertEqual(
+            {len(items) for items in data["charts"].values()},
+            {7},
+        )
+        self.assertEqual(
+            set(data["charts"]["environment"][0]),
+            {
+                "date",
+                "display_date",
+                "temperature_c",
+                "internal_humidity_percent",
+                "material_moisture_percent",
+            },
+        )
+        self.assertEqual(
+            data["charts"]["environment"][0]["material_moisture_percent"],
+            42.5,
+        )
+
     def test_all_fields_are_read_only(self):
         serializer = AnalysisReportSerializer(
             data={
@@ -2038,6 +2225,7 @@ class AnalysisReportSerializerTests(HistoryAnalysisTestCase):
         self.assertTrue(serializer.is_valid())
         self.assertEqual(serializer.validated_data, {})
         self.assertTrue(serializer.fields["comparison"].read_only)
+        self.assertTrue(serializer.fields["charts"].read_only)
         self.assertTrue(serializer.fields["ai_result"].read_only)
 
 
@@ -2056,6 +2244,18 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
             "analyze-history-session",
             kwargs={"session_id": session_id},
         )
+
+    def test_explicit_analysis_allows_session_not_included_in_reports(self):
+        session = self.create_session()
+        session.include_in_report = False
+        session.save(update_fields=["include_in_report"])
+        self.add_uniform_readings(session)
+
+        response = self.client.post(self.get_url(session.id))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["session_id"], session.id)
+        self.assertTrue(AnalysisReport.objects.filter(session=session).exists())
 
     @patch(
         "analysis.serializers.get_local_date",
@@ -2107,6 +2307,16 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "deformation_ratio": 0.01,
                 "deformation_percent": 1.0,
                 "moisture_detected": False,
+                "presentation": {
+                    "total_load_kg": 4.0,
+                    "bias_magnitude_percent": 10.0,
+                    "left_load_percent": 45.0,
+                    "right_load_percent": 55.0,
+                    "shape_deviation_percent": 1.0,
+                    "temperature_c": 25.0,
+                    "internal_humidity_percent": 50.0,
+                    "material_moisture_percent": None,
+                },
             },
         )
         self.assertEqual(
@@ -2119,6 +2329,7 @@ class AnalyzeHistorySessionApiTests(HistoryAnalysisTestCase):
                 "period",
                 "display_period",
                 "metrics",
+                "charts",
                 "chart_references",
                 "comparison",
                 "ai_result",
@@ -2414,6 +2625,26 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         report, _created = analyze_history_session(session)
         return session, report
 
+    def test_retrieves_full_snapshot_for_session_not_included_in_reports(self):
+        session, report = self.create_report()
+        eligible_response = self.client.get(self.get_url(report.id))
+        session.include_in_report = False
+        session.save(update_fields=["include_in_report"])
+
+        response = self.client.get(self.get_url(report.id))
+
+        self.assertEqual(eligible_response.status_code, 200)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], report.id)
+        self.assertEqual(response.data["session_id"], session.id)
+        self.assertEqual(_source_metrics(response.data["metrics"]), report.metrics)
+        self.assertEqual(response.data["charts"], eligible_response.data["charts"])
+        self.assertEqual(
+            _source_comparison(response.data["comparison"]),
+            report.comparison,
+        )
+        self.assertEqual(response.data["ai_result"], report.ai_result)
+
     @patch(
         "analysis.serializers.get_local_date",
         return_value=date(2026, 8, 14),
@@ -2433,6 +2664,7 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
                 "period",
                 "display_period",
                 "metrics",
+                "charts",
                 "chart_references",
                 "comparison",
                 "ai_result",
@@ -2545,6 +2777,10 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
             post_response.data["chart_references"],
         )
         self.assertEqual(
+            get_response.data["charts"],
+            post_response.data["charts"],
+        )
+        self.assertEqual(
             get_response.data["metrics"]["daily_series"],
             post_response.data["metrics"]["daily_series"],
         )
@@ -2636,6 +2872,35 @@ class AnalysisReportDetailApiTests(HistoryAnalysisTestCase):
         self.assertEqual(
             response.data["care_guideline_snapshot"], original_snapshot
         )
+        self.assertEqual(response.data["charts"], second_response.data["charts"])
+        self.assertEqual(len(response.data["charts"]["load"]), 7)
+
+    def test_legacy_daily_series_returns_empty_charts_without_recalculation(self):
+        _session, report = self.create_report()
+        legacy_metrics = deepcopy(report.metrics)
+        for item in legacy_metrics["daily_series"]:
+            item.pop("presentation")
+        report.metrics = legacy_metrics
+        report.save(update_fields=["metrics", "updated_at"])
+
+        first_reading = report.session.readings.order_by("sequence").first()
+        first_reading.strap_load = Decimal("99.00")
+        first_reading.save(update_fields=["strap_load"])
+
+        with self.assertNumQueries(1):
+            response = self.client.get(self.get_url(report.pk))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.data["charts"],
+            {"load": [], "shape": [], "environment": []},
+        )
+        self.assertEqual(
+            _source_metrics(response.data["metrics"]),
+            legacy_metrics,
+        )
+        self.assertEqual(response.data["metrics"]["daily_series"][0]["load_kg"], 4.0)
+        self.mock_generation.assert_not_called()
 
     @patch(
         "analysis.serializers.get_local_date",
@@ -2729,6 +2994,7 @@ class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
         purpose=MeasurementSession.Purpose.HISTORY,
         status=MeasurementSession.Status.COMPLETED,
         scenario=None,
+        include_in_report=True,
     ):
         bag = bag or self.bag
         started_at = started_at or self.fixed_now - timedelta(days=9)
@@ -2742,6 +3008,7 @@ class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
             started_at=started_at,
             ended_at=ended_at,
             status=status,
+            include_in_report=include_in_report,
         )
         daily_series = [
             {
@@ -2774,6 +3041,20 @@ class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
             ai_result={"status": "SUCCESS", "marker": session.pk},
         )
         return session, report
+
+    def test_excludes_newer_report_not_included_and_returns_older_eligible(self):
+        _older_session, older_report = self.create_report(
+            ended_at=self.fixed_now - timedelta(days=3),
+        )
+        self.create_report(
+            ended_at=self.fixed_now - timedelta(days=1),
+            include_in_report=False,
+        )
+
+        response = self.client.get(self.get_url())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["id"], older_report.id)
 
     def test_scopes_latest_report_to_each_bag(self):
         _session_a, report_a = self.create_report(
@@ -2939,6 +3220,10 @@ class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
             },
         )
         self.assertEqual(response.data["ai_result"], report.ai_result)
+        self.assertEqual(
+            response.data["charts"],
+            {"load": [], "shape": [], "environment": []},
+        )
         JSONRenderer().render(response.data)
 
     def test_get_does_not_reanalyze_call_ai_or_mutate_snapshot(self):
@@ -2966,6 +3251,10 @@ class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
         self.assertEqual(report.comparison, original_comparison)
         self.assertEqual(report.ai_result, original_ai_result)
         self.assertEqual(report.updated_at, original_updated_at)
+        self.assertEqual(
+            response.data["charts"],
+            {"load": [], "shape": [], "environment": []},
+        )
 
     def test_non_get_methods_are_not_allowed(self):
         self.create_report()
@@ -3354,6 +3643,23 @@ class HistoryAIContextTests(HistoryAITestCase):
         )
         self.assertNotIn("daily_series", context["metrics"])
         self.assertNotIn("reading_count", context["metrics"])
+        self.assertNotIn("presentation", json.dumps(context))
+
+    def test_excludes_live_presentation_and_live_states_from_ai_context(self):
+        report = self.create_normal_report()
+        report.care_guideline_snapshot["live_presentation"] = {
+            "display_metrics": ["LIVE_ONLY"]
+        }
+        report.care_guideline_snapshot["live_states"] = {
+            "stable": {"code": "LIVE_ONLY"}
+        }
+
+        context = build_history_ai_context(report)
+        serialized = json.dumps(context)
+
+        self.assertNotIn("live_presentation", serialized)
+        self.assertNotIn("live_states", serialized)
+        self.assertNotIn("LIVE_ONLY", serialized)
 
     def test_excludes_scenario_data(self):
         scenario = self.create_scenario(code="OVERLOAD_HISTORY")

@@ -13,6 +13,23 @@ from .presentation import (
 )
 
 
+EMPTY_CHARTS = {
+    "load": [],
+    "shape": [],
+    "environment": [],
+}
+
+CHART_PRESENTATION_KEYS = {
+    "total_load_kg",
+    "left_load_percent",
+    "right_load_percent",
+    "shape_deviation_percent",
+    "temperature_c",
+    "internal_humidity_percent",
+    "material_moisture_percent",
+}
+
+
 def _as_json_number(value):
     if isinstance(value, bool) or not isinstance(value, (int, float, Decimal)):
         return None
@@ -39,6 +56,7 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
     period = serializers.SerializerMethodField()
     display_period = serializers.SerializerMethodField()
     metrics = serializers.SerializerMethodField()
+    charts = serializers.SerializerMethodField()
     chart_references = serializers.SerializerMethodField()
     comparison = serializers.SerializerMethodField()
 
@@ -51,6 +69,7 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
             "period",
             "display_period",
             "metrics",
+            "charts",
             "chart_references",
             "comparison",
             "ai_result",
@@ -90,6 +109,62 @@ class AnalysisReportSerializer(serializers.ModelSerializer):
             self._get_display_reference_date(),
         )
         return metrics
+
+    def get_charts(self, obj):
+        metrics = self.get_metrics(obj)
+        if not isinstance(metrics, dict):
+            return deepcopy(EMPTY_CHARTS)
+
+        daily_series = metrics.get("daily_series")
+        if not isinstance(daily_series, list):
+            return deepcopy(EMPTY_CHARTS)
+
+        for item in daily_series:
+            if not isinstance(item, dict):
+                return deepcopy(EMPTY_CHARTS)
+            presentation = item.get("presentation")
+            if not isinstance(presentation, dict) or not (
+                CHART_PRESENTATION_KEYS <= presentation.keys()
+            ):
+                return deepcopy(EMPTY_CHARTS)
+
+        charts = deepcopy(EMPTY_CHARTS)
+        for item in daily_series:
+            presentation = item["presentation"]
+            dates = {
+                "date": item.get("date"),
+                "display_date": item.get("display_date"),
+            }
+            charts["load"].append(
+                {
+                    **dates,
+                    "total_load_kg": presentation["total_load_kg"],
+                    "left_load_percent": presentation["left_load_percent"],
+                    "right_load_percent": presentation["right_load_percent"],
+                }
+            )
+            charts["shape"].append(
+                {
+                    **dates,
+                    "shape_deviation_percent": presentation[
+                        "shape_deviation_percent"
+                    ],
+                }
+            )
+            charts["environment"].append(
+                {
+                    **dates,
+                    "temperature_c": presentation["temperature_c"],
+                    "internal_humidity_percent": presentation[
+                        "internal_humidity_percent"
+                    ],
+                    "material_moisture_percent": presentation[
+                        "material_moisture_percent"
+                    ],
+                }
+            )
+
+        return charts
 
     def get_comparison(self, obj):
         comparison = deepcopy(obj.comparison)
