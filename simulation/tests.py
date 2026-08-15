@@ -29,7 +29,7 @@ class LiveResponseContractTests(APITestCase):
             username="live-response-owner",
             password="test-password",
         )
-        product_model = ProductModel.objects.create(
+        cls.product_model = ProductModel.objects.create(
             brand="Test Brand",
             model_name="Test Live Bag",
             material="Leather",
@@ -37,7 +37,7 @@ class LiveResponseContractTests(APITestCase):
             demo_live_scenario_code="NORMAL_LIVE",
         )
         cls.bag = Bag.objects.create(
-            product_model=product_model,
+            product_model=cls.product_model,
             owner=owner,
             nfc_uid="LIVE-RESPONSE-NFC",
         )
@@ -101,6 +101,12 @@ class LiveResponseContractTests(APITestCase):
     def json_payload(self, response):
         return json.loads(response.content.decode("utf-8"))
 
+    def configure_display_metrics(self, display_metrics):
+        self.product_model.care_guideline = {
+            "live_presentation": {"display_metrics": display_metrics}
+        }
+        self.product_model.save(update_fields=["care_guideline"])
+
     def test_ensure_and_latest_reading_return_complete_json_contract(self):
         ensure_response = self.ensure_live_session()
 
@@ -148,7 +154,10 @@ class LiveResponseContractTests(APITestCase):
         self.assertIsNone(payload["material_moisture_percent"])
         self.assertIsInstance(payload["is_finished"], bool)
 
-        self.assertEqual(set(payload["presentation"]), {"values"})
+        self.assertEqual(
+            set(payload["presentation"]), {"values", "display_metrics"}
+        )
+        self.assertEqual(payload["presentation"]["display_metrics"], [])
         presentation_values = payload["presentation"]["values"]
         self.assertEqual(
             set(presentation_values),
@@ -182,6 +191,104 @@ class LiveResponseContractTests(APITestCase):
         self.assertEqual(measured_at, reading.measured_at)
         self.assertEqual(observed_at, self.current_time)
         self.mock_observation_clock.assert_called_once_with()
+
+    def test_product_a_display_metrics_follow_config_order_and_reuse_values(self):
+        self.configure_display_metrics(
+            [
+                {"key": "right_load_percent", "label": "우측 하중", "unit": "%"},
+                {
+                    "key": "shape_deviation_percent",
+                    "label": "형태 편차",
+                    "unit": "%",
+                },
+                {"key": "temperature_c", "label": "현재 온도", "unit": "°C"},
+            ]
+        )
+        session_id = self.ensure_live_session().data["session_id"]
+
+        payload = self.json_payload(self.get_latest_reading(session_id))
+        values = payload["presentation"]["values"]
+
+        self.assertEqual(
+            payload["presentation"]["display_metrics"],
+            [
+                {
+                    "key": "right_load_percent",
+                    "label": "우측 하중",
+                    "value": values["right_load_percent"],
+                    "unit": "%",
+                },
+                {
+                    "key": "shape_deviation_percent",
+                    "label": "형태 편차",
+                    "value": values["shape_deviation_percent"],
+                    "unit": "%",
+                },
+                {
+                    "key": "temperature_c",
+                    "label": "현재 온도",
+                    "value": values["temperature_c"],
+                    "unit": "°C",
+                },
+            ],
+        )
+
+    def test_product_b_display_metrics_keep_null_material_moisture(self):
+        self.configure_display_metrics(
+            [
+                {
+                    "key": "shape_deviation_percent",
+                    "label": "형태 편차",
+                    "unit": "%",
+                },
+                {
+                    "key": "material_moisture_percent",
+                    "label": "소재 수분도",
+                    "unit": "%",
+                },
+                {
+                    "key": "internal_humidity_percent",
+                    "label": "내부 습도",
+                    "unit": "%",
+                },
+            ]
+        )
+        session_id = self.ensure_live_session().data["session_id"]
+
+        payload = self.json_payload(self.get_latest_reading(session_id))
+        metrics = payload["presentation"]["display_metrics"]
+
+        self.assertEqual([metric["key"] for metric in metrics], [
+            "shape_deviation_percent",
+            "material_moisture_percent",
+            "internal_humidity_percent",
+        ])
+        self.assertIsNone(metrics[1]["value"])
+
+    def test_invalid_display_metric_key_is_skipped_without_api_error(self):
+        self.configure_display_metrics(
+            [
+                {"key": "unknown_metric", "label": "Invalid", "unit": "%"},
+                {"key": "temperature_c", "label": "현재 온도", "unit": "°C"},
+            ]
+        )
+        session_id = self.ensure_live_session().data["session_id"]
+
+        response = self.get_latest_reading(session_id)
+        payload = self.json_payload(response)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            payload["presentation"]["display_metrics"],
+            [
+                {
+                    "key": "temperature_c",
+                    "label": "현재 온도",
+                    "value": payload["presentation"]["values"]["temperature_c"],
+                    "unit": "°C",
+                }
+            ],
+        )
 
     def test_same_sequence_keeps_measurement_time_without_duplicate_reading(self):
         session_id = self.ensure_live_session().data["session_id"]
@@ -456,14 +563,14 @@ class MaterialMoistureGenerationTests(APITestCase):
             username="material-moisture-generation-owner",
             password="test-password",
         )
-        product_model = ProductModel.objects.create(
+        cls.product_model = ProductModel.objects.create(
             brand="Test Brand",
             model_name="Material Moisture Generation Bag",
             material="Leather",
             care_guideline={},
         )
         cls.bag = Bag.objects.create(
-            product_model=product_model,
+            product_model=cls.product_model,
             owner=owner,
             nfc_uid="MATERIAL-MOISTURE-GENERATION-NFC",
         )
@@ -575,6 +682,18 @@ class MaterialMoistureGenerationTests(APITestCase):
         self.assertIsNone(result["material_moisture_percent"])
 
     def test_latest_reading_api_presents_numeric_material_moisture(self):
+        self.product_model.care_guideline = {
+            "live_presentation": {
+                "display_metrics": [
+                    {
+                        "key": "material_moisture_percent",
+                        "label": "소재 수분도",
+                        "unit": "%",
+                    }
+                ]
+            }
+        }
+        self.product_model.save(update_fields=["care_guideline"])
         session = self.create_session(
             "API_NUMERIC",
             material_moisture_config={"min": 42.5, "max": 42.5},
@@ -604,4 +723,15 @@ class MaterialMoistureGenerationTests(APITestCase):
                 "material_moisture_percent"
             ],
             42.5,
+        )
+        self.assertEqual(
+            response.data["presentation"]["display_metrics"],
+            [
+                {
+                    "key": "material_moisture_percent",
+                    "label": "소재 수분도",
+                    "value": 42.5,
+                    "unit": "%",
+                }
+            ],
         )

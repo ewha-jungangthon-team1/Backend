@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from decimal import ROUND_HALF_UP, Decimal
 
 
@@ -99,6 +100,42 @@ def build_sensor_presentation_values(
             material_moisture_percent
         ),
     }
+
+
+def build_display_metrics(presentation_values, care_guideline):
+    """Build ordered UI metrics from ProductModel care-guideline configuration."""
+    if not isinstance(presentation_values, Mapping) or not isinstance(
+        care_guideline, Mapping
+    ):
+        return []
+
+    live_presentation = care_guideline.get("live_presentation")
+    if not isinstance(live_presentation, Mapping):
+        return []
+
+    configured_metrics = live_presentation.get("display_metrics")
+    if not isinstance(configured_metrics, list):
+        return []
+
+    display_metrics = []
+    for configured_metric in configured_metrics:
+        if not isinstance(configured_metric, Mapping):
+            continue
+
+        key = configured_metric.get("key")
+        if not isinstance(key, str) or key not in presentation_values:
+            continue
+
+        display_metrics.append(
+            {
+                "key": key,
+                "label": configured_metric.get("label"),
+                "value": presentation_values[key],
+                "unit": configured_metric.get("unit"),
+            }
+        )
+
+    return display_metrics
 
 
 def determine_load_direction(load_bias):
