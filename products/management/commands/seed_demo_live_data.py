@@ -303,7 +303,6 @@ class Command(BaseCommand):
                 "max_humidity_percent": 70,
                 "max_abs_load_bias": 0.30,
                 "max_body_deformation_ratio": 0.03,
-                "note": DEMO_GUIDELINE_NOTE,
             }
         )
         product_a.brand, product_a.model_name = PRODUCT_A_FINAL_IDENTITY

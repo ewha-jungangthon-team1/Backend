@@ -3082,6 +3082,21 @@ class BagLatestAnalysisReportApiTests(HistoryAnalysisTestCase):
         _older_session, later_created_report = self.create_report(
             ended_at=self.fixed_now - timedelta(days=5),
         )
+        
+        AnalysisReport.objects.filter(
+            pk=newer_period_report.pk
+        ).update(
+            created_at=self.fixed_now - timedelta(hours=2)
+        )
+
+        AnalysisReport.objects.filter(
+            pk=later_created_report.pk
+        ).update(
+            created_at=self.fixed_now - timedelta(hours=1)
+        )
+
+        newer_period_report.refresh_from_db()
+        later_created_report.refresh_from_db()
 
         response = self.client.get(self.get_url())
 
