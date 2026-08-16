@@ -4,8 +4,12 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 
-from products.models import Bag
+from analysis.live_rules import evaluate_live_session_rules
+from analysis.live_state import build_live_state
+from measurements.home import build_display_metrics, build_sensor_presentation_values
 from measurements.models import MeasurementSession
+from products.models import Bag
+
 from .serializers import LiveSessionSerializer
 from .services import (
     close_session,
@@ -22,7 +26,10 @@ def ensure_live_session_view(request, public_token):
     except Bag.DoesNotExist:
         return Response({"detail": "존재하지 않는 가방입니다."}, status=http_status.HTTP_404_NOT_FOUND)
 
-    session, created = ensure_live_session(bag)
+    try:
+        session, created = ensure_live_session(bag)
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=http_status.HTTP_400_BAD_REQUEST)
     serializer = LiveSessionSerializer(session, context={"created": created})
     return Response(serializer.data)
 
@@ -30,7 +37,9 @@ def ensure_live_session_view(request, public_token):
 @api_view(["GET"])
 def latest_reading_view(request, session_id):
     try:
-        session = MeasurementSession.objects.select_related("scenario").get(id=session_id)
+        session = MeasurementSession.objects.select_related(
+            "scenario", "bag__product_model"
+        ).get(id=session_id)
     except MeasurementSession.DoesNotExist:
         return Response({"detail": "존재하지 않는 세션입니다."}, status=http_status.HTTP_404_NOT_FOUND)
 
@@ -38,7 +47,40 @@ def latest_reading_view(request, session_id):
     if reading is None:
         return Response({"detail": "아직 생성된 데이터가 없습니다."}, status=http_status.HTTP_404_NOT_FOUND)
 
-    return Response(reading)
+    if session.purpose == MeasurementSession.Purpose.LIVE:
+        rule_result = evaluate_live_session_rules(session, reading)
+        state = build_live_state(
+            rule_result,
+            session.bag.product_model.care_guideline,
+        )
+    else:
+        state = build_live_state(
+            {"active_rules": [], "unavailable_rules": []},
+            {},
+        )
+
+    presentation_values = build_sensor_presentation_values(
+        strap_load=reading["strap_load"],
+        load_bias=reading["load_bias"],
+        body_deformation_ratio=reading["body_deformation_ratio"],
+        temperature=reading["temperature"],
+        humidity=reading["humidity"],
+        material_moisture_percent=reading["material_moisture_percent"],
+    )
+    display_metrics = build_display_metrics(
+        presentation_values,
+        session.bag.product_model.care_guideline,
+    )
+    return Response(
+        {
+            **reading,
+            "presentation": {
+                "values": presentation_values,
+                "display_metrics": display_metrics,
+                "state": state,
+            },
+        }
+    )
 
 
 # ------------------------------------------------------------

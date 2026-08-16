@@ -1,8 +1,8 @@
 from django.urls import path
 
-from .views import SessionDetailView, SessionListView
+from .views import *
 
 urlpatterns = [
-    path("<uuid:public_token>/sessions/", SessionListView.as_view(), name="session-list"),
-    path("<uuid:public_token>/sessions/<int:session_id>/", SessionDetailView.as_view(), name="session-detail"),
+    # home 화면 API1
+    path("bags/<uuid:public_token>/home/",HomeView.as_view(),name="bag-home"),
 ]

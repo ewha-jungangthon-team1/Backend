@@ -3,6 +3,7 @@ from datetime import timedelta
 
 from django.db import transaction
 from django.utils import timezone
+from django.utils.timezone import now as get_current_time
 
 from .models import SimulationScenario
 from measurements.models import MeasurementSession, SensorReading
@@ -17,63 +18,37 @@ DEMO_REAL_SECONDS = 180
 # 프론트가 latest-reading을 폴링하는 권장 주기(초). API 2 응답에 그대로 실어보낸다.
 POLLING_INTERVAL_SECONDS = 2
 
-# 시연 시나리오 자동 선택 순서 (라운드로빈)
-SCENARIO_ROTATION_ORDER = [
-    "NORMAL",
-    "OVERLOAD",
-    "HIGH_TEMPERATURE",
-    "HIGH_HUMIDITY",
-    "COMPOSITE_RISK",
-]
-
 # SensorReading에서 config 기반으로 계산해야 하는 필드 목록
 # → 필드 하나 추가/삭제하고 싶으면 여기 + FIELD_PRECISION만 고치면 됨
 FIELD_NAMES = [
     "strap_load",
-    "strap_strain",
     "humidity",
     "temperature",
     "load_bias",
     "body_deformation_ratio",
+    "material_moisture_percent",
 ]
 
 # 필드별 반올림 자릿수
 FIELD_PRECISION = {
     "strap_load": 2,
-    "strap_strain": 4,
     "humidity": 2,
     "temperature": 2,
     "load_bias": 4,
     "body_deformation_ratio": 4,
+    "material_moisture_percent": 2,
 }
 
 # 0 밑으로 내려가면 안 되는 필드 (모델의 MinValueValidator(0)과 맞춤)
-FIELD_MIN_CLAMP = {"body_deformation_ratio": 0}
+FIELD_MIN_CLAMP = {
+    "body_deformation_ratio": 0,
+    "material_moisture_percent": 0,
+}
+FIELD_MAX_CLAMP = {"material_moisture_percent": 100}
+OPTIONAL_FIELD_NAMES = {"material_moisture_percent"}
 
 # start/end 패턴일 때 더할 노이즈 크기 (구간 대비 비율)
 NOISE_RATIO = 0.02
-
-
-# ============================================================
-# 시나리오 선택
-# ============================================================
-
-def pick_next_scenario_type(bag):
-    """이 가방이 최근에 쓴 LIVE 시나리오의 다음 순서를 라운드로빈으로 고른다."""
-    last_session = (
-        MeasurementSession.objects.filter(
-            bag=bag, purpose=MeasurementSession.Purpose.LIVE
-        )
-        .exclude(scenario__isnull=True)
-        .order_by("-started_at")
-        .first()
-    )
-    if not last_session or last_session.scenario.scenario_type not in SCENARIO_ROTATION_ORDER:
-        return SCENARIO_ROTATION_ORDER[0]
-
-    idx = SCENARIO_ROTATION_ORDER.index(last_session.scenario.scenario_type)
-    next_idx = (idx + 1) % len(SCENARIO_ROTATION_ORDER)
-    return SCENARIO_ROTATION_ORDER[next_idx]
 
 
 # ============================================================
@@ -129,7 +104,7 @@ def calculate_progress(session):
     total_count = calculate_total_reading_count(scenario)
     raw_index = logical_elapsed / scenario.sample_interval_seconds
     target_sequence = min(int(raw_index), total_count - 1)
-    local_ratio = (raw_index - target_sequence) if target_sequence < total_count - 1 else 0.0
+    local_ratio = min(max(raw_index - target_sequence, 0.0), 1.0)
 
     return target_sequence, total_count, local_ratio
 
@@ -160,9 +135,16 @@ def generate_single_reading(session, sequence, total_count):
 
     values = {}
     for field in FIELD_NAMES:
-        raw_value = compute_field_value(config.get(field), progress, rng)
+        field_config = config.get(field)
+        if field in OPTIONAL_FIELD_NAMES and field_config is None:
+            values[field] = None
+            continue
+
+        raw_value = compute_field_value(field_config, progress, rng)
         if field in FIELD_MIN_CLAMP:
             raw_value = max(raw_value, FIELD_MIN_CLAMP[field])
+        if field in FIELD_MAX_CLAMP:
+            raw_value = min(raw_value, FIELD_MAX_CLAMP[field])
         values[field] = round(raw_value, FIELD_PRECISION[field])
 
     return SensorReading.objects.create(
@@ -251,11 +233,30 @@ def close_session(session, ended_at=None):
     return session
 
 
+def resolve_demo_live_scenario(product_model):
+    """상품에 설정된 활성 LIVE 데모 시나리오를 반환한다."""
+    scenario_code = product_model.demo_live_scenario_code
+    if not scenario_code or not scenario_code.strip():
+        raise ValueError("이 상품에는 LIVE 데모 시나리오가 설정되어 있지 않습니다.")
+
+    try:
+        scenario = SimulationScenario.objects.get(code=scenario_code.strip())
+    except SimulationScenario.DoesNotExist as exc:
+        raise ValueError("설정된 LIVE 데모 시나리오를 찾을 수 없습니다.") from exc
+
+    if not scenario.is_active:
+        raise ValueError("설정된 LIVE 데모 시나리오가 비활성 상태입니다.")
+    if scenario.mode != SimulationScenario.Mode.LIVE:
+        raise ValueError("설정된 데모 시나리오는 LIVE 모드여야 합니다.")
+
+    return scenario
+
+
 @transaction.atomic
 def ensure_live_session(bag):
     """
     RUNNING 상태인 LIVE 세션이 있으면 그대로 반환.
-    없으면 다음 시나리오(라운드로빈)로 새 세션을 만든다 (데이터는 아직 안 채워짐).
+    없으면 상품에 설정된 데모 LIVE 시나리오로 새 세션을 만든다 (데이터는 아직 안 채워짐).
 
     select_for_update()로 새로고침 연타 같은 동시 요청에도 세션이 중복 생성되지 않도록 막는다.
     ※ SQLite에서는 로우 단위가 아니라 DB 전체 잠금으로 동작하지만, 데모 규모에선 문제 없음.
@@ -274,13 +275,13 @@ def ensure_live_session(bag):
         if elapsed <= DEMO_REAL_SECONDS:
             return existing, False
         # 앱을 닫고 가버려서 데모 시간이 다 지났는데도 RUNNING으로 남아있던 세션 → 정리
+        ensure_readings_up_to_now(existing)
         existing.status = MeasurementSession.Status.COMPLETED
         existing.ended_at = timezone.now()
         existing.save(update_fields=["status", "ended_at"])
 
-    scenario_type = pick_next_scenario_type(bag)
-    scenario_code = f"{scenario_type}_LIVE"  # fixture의 code 규칙과 동일 (예: OVERLOAD_LIVE)
-    session, _total_count = create_simulation_session(bag, scenario_code)
+    scenario = resolve_demo_live_scenario(bag.product_model)
+    session, _total_count = create_simulation_session(bag, scenario.code)
     return session, True
 
 
@@ -296,6 +297,8 @@ def get_latest_reading(session):
     화면이 부드럽게 움직이도록, 방금 값과 그 직전 값 사이를 구간 진행률만큼
     보간해서 '보여주기'만 한다 (DB에 새로 저장하지 않음).
     """
+    observed_at = get_current_time()
+
     if session.purpose == MeasurementSession.Purpose.HISTORY:
         latest = session.readings.order_by("-sequence").first()
         local_ratio = 0.0
@@ -304,6 +307,10 @@ def get_latest_reading(session):
         _target_sequence, _total_count, local_ratio = calculate_progress(session)
         latest = ensure_readings_up_to_now(session)
         progress_ratio = calculate_overall_progress_ratio(session)
+
+        # 시연 시간 종료 시 Session 자동 종료
+        if progress_ratio >= 1.0 and session.status == MeasurementSession.Status.RUNNING:
+            close_session(session)
 
     if latest is None:
         return None
@@ -315,21 +322,44 @@ def get_latest_reading(session):
     )
 
     if previous is not None:
-        display = {
-            field: round(_lerp(getattr(previous, field), getattr(latest, field), local_ratio), FIELD_PRECISION[field])
-            for field in FIELD_NAMES
-        }
+        display = {}
+        for field in FIELD_NAMES:
+            previous_value = getattr(previous, field)
+            latest_value = getattr(latest, field)
+            if previous_value is None and latest_value is None:
+                display[field] = None
+            elif previous_value is None:
+                display[field] = float(latest_value)
+            elif latest_value is None:
+                display[field] = float(previous_value)
+            else:
+                display[field] = round(
+                    _lerp(previous_value, latest_value, local_ratio),
+                    FIELD_PRECISION[field],
+                )
         moisture_detected = bool(previous.moisture_detected or latest.moisture_detected)
     else:
-        display = {field: float(getattr(latest, field)) for field in FIELD_NAMES}
+        display = {
+            field: (
+                float(getattr(latest, field))
+                if getattr(latest, field) is not None
+                else None
+            )
+            for field in FIELD_NAMES
+        }
         moisture_detected = latest.moisture_detected
 
     return {
         "session_id": session.id,
         "sequence": latest.sequence,
+        "measured_at": latest.measured_at,
+        "observed_at": observed_at,
         "scenario_type": session.scenario.scenario_type,
         "progress_ratio": round(progress_ratio, 3),
         "is_finished": progress_ratio >= 1.0,
         "moisture_detected": moisture_detected,
         **display,
     }
+
+def get_latest_session_for_bag(bag):
+    return bag.sessions.order_by("-started_at").first()

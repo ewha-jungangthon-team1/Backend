@@ -3,7 +3,6 @@ from products.models import Bag
 from simulation.models import SimulationScenario
 from django.core.validators import MinValueValidator, MaxValueValidator
 
-
 class MeasurementSession(models.Model):
     class Purpose(models.TextChoices):
         LIVE = "live", "Live"
@@ -26,6 +25,7 @@ class MeasurementSession(models.Model):
     started_at = models.DateTimeField()
     ended_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=Status.choices)
+    include_in_report = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     
     def __str__(self):
@@ -35,8 +35,17 @@ class MeasurementSession(models.Model):
 class SensorReading(models.Model):
     session = models.ForeignKey(MeasurementSession, on_delete=models.CASCADE, related_name="readings")
     strap_load = models.DecimalField(max_digits=6, decimal_places=2)
-    strap_strain = models.DecimalField(max_digits=6, decimal_places=4)
     humidity = models.DecimalField(max_digits=5, decimal_places=2)
+    material_moisture_percent = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        validators=[
+            MinValueValidator(0),
+            MaxValueValidator(100),
+        ],
+    )
     moisture_detected = models.BooleanField(default=False)
     temperature = models.DecimalField(max_digits=5, decimal_places=2)
     measured_at = models.DateTimeField()
