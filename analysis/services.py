@@ -5,6 +5,14 @@ from django.utils import timezone
 
 from measurements.models import MeasurementSession
 
+from .ai import (
+    HistoryAIGenerationError,
+    build_history_ai_context,
+    build_history_ai_fallback,
+    generate_history_ai_content,
+    get_openai_model,
+    validate_history_ai_result,
+)
 from .comparisons import (
     build_history_metric_comparison,
     find_previous_history_session,
@@ -80,6 +88,45 @@ def analyze_history_session(
             "unavailable_rules": rule_result["unavailable_rules"],
             "care_guideline_snapshot": care_guideline_snapshot,
             "comparison": comparison_snapshot,
+            "ai_result": {},
         },
     )
+    return report, created
+
+
+def analyze_history_session_with_ai(
+    session: MeasurementSession,
+) -> tuple[AnalysisReport, bool]:
+    report, created = analyze_history_session(session)
+    context = build_history_ai_context(report)
+    resolved_model = get_openai_model()
+
+    try:
+        content = generate_history_ai_content(
+            context,
+            model=resolved_model,
+        )
+    except HistoryAIGenerationError as error:
+        ai_result = {
+            "schema_version": 1,
+            "status": "FALLBACK",
+            "generated_at": _as_project_timezone_iso(timezone.now()),
+            "provider": "deterministic",
+            "model": None,
+            "fallback_reason": error.reason,
+            "content": build_history_ai_fallback(report),
+        }
+    else:
+        ai_result = {
+            "schema_version": 1,
+            "status": "SUCCESS",
+            "generated_at": _as_project_timezone_iso(timezone.now()),
+            "provider": "openai",
+            "model": resolved_model,
+            "fallback_reason": None,
+            "content": content,
+        }
+
+    report.ai_result = validate_history_ai_result(ai_result)
+    report.save(update_fields=["ai_result", "updated_at"])
     return report, created

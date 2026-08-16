@@ -84,6 +84,7 @@ def find_previous_history_session(current_session):
             bag_id=current_session.bag_id,
             purpose=MeasurementSession.Purpose.HISTORY,
             status=MeasurementSession.Status.COMPLETED,
+            include_in_report=True,
             ended_at__isnull=False,
         )
         .exclude(pk=current_session.pk)

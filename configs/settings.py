@@ -35,6 +35,10 @@ ALLOWED_HOSTS = [
     if host.strip()
 ]
 
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-5.6-terra')
+OPENAI_TIMEOUT_SECONDS = float(os.getenv('OPENAI_TIMEOUT_SECONDS', '12'))
+
 
 # Application definition
 

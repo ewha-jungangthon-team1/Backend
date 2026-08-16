@@ -8,6 +8,7 @@ class ProductModel(models.Model):
     model_name = models.CharField(max_length=100)
     material = models.CharField(max_length=100)
     care_guideline = models.JSONField()
+    demo_live_scenario_code = models.CharField(max_length=50, blank=True, null=True)
 
     def __str__(self):
         return f"{self.brand} {self.model_name}"
