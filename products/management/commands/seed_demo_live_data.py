@@ -295,6 +295,17 @@ class Command(BaseCommand):
             "Product A care_guideline",
         )
 
+        guideline.update(
+            {
+                "avoid_moisture": True,
+                "max_load_kg": 5.5,
+                "recommended_temp_range_c": [0, 35],
+                "max_humidity_percent": 70,
+                "max_abs_load_bias": 0.30,
+                "max_body_deformation_ratio": 0.03,
+                "note": DEMO_GUIDELINE_NOTE,
+            }
+        )
         product_a.brand, product_a.model_name = PRODUCT_A_FINAL_IDENTITY
         product_a.material = "Leather"
         product_a.demo_live_scenario_code = PRODUCT_A_SCENARIO_CODE
