@@ -66,6 +66,40 @@ PRODUCT_B_CARE_ACTIONS = {
     },
 }
 
+PRODUCT_A_CARE_ACTIONS = {
+    "HIGH_TEMPERATURE": {
+        "title": "가방을 서늘한 곳으로 옮겨 주세요.",
+        "reason": (
+            "높은 온도에 오래 노출돼 먼저 열을 식혀 주는 것이 좋아요."
+        ),
+        "steps": [
+            "직사광선을 피하고 통풍이 되는 실내에 두어 주세요.",
+            "가방의 온도가 안정될 때까지 유지해 주세요.",
+        ],
+    },
+    "LOAD_BIAS": {
+        "title": "무게가 한쪽에 쏠리지 않게 해주세요.",
+        "reason": (
+            "오른쪽에 무게가 집중돼 있어 하중을 줄여 주는 것이 좋아요."
+        ),
+        "steps": [
+            "내용물을 모두 꺼내고, 한쪽 면에 무게가 남지 않도록 정리해 주세요.",
+            "형태가 안정되기 전에는 무거운 물건을 다시 넣지 않는 것이 좋아요.",
+        ],
+    },
+    "DEFORMATION": {
+        "title": "형태가 눌리지 않도록 안정적으로 보관해 주세요.",
+        "reason": (
+            "형태 변화가 더 커지지 않도록 원래 형태가 유지되는 자세로 "
+            "두는 것이 좋아요."
+        ),
+        "steps": [
+            "다른 물건에 눌리지 않도록 공간을 두고 세워 주세요.",
+            "가방의 형태를 유지할 수 있도록 안정된 곳에 두어 주세요.",
+        ],
+    },
+}
+
 LIVE_STATE_FALLBACK = {
     "code": "ATTENTION",
     "headline": "가방 상태에 변화가 감지됐어요",
@@ -284,6 +318,13 @@ class Command(BaseCommand):
             product_a.care_guideline,
             "Product A care_guideline",
         )
+        existing_actions = guideline.get("care_actions", {})
+        existing_actions = _require_mapping(
+            existing_actions,
+            "Product A care_guideline.care_actions",
+        )
+        existing_actions.update(deepcopy(PRODUCT_A_CARE_ACTIONS))
+
         _merge_live_presentation(
             guideline,
             PRODUCT_A_DISPLAY_METRICS,
@@ -303,6 +344,8 @@ class Command(BaseCommand):
                 "max_humidity_percent": 70,
                 "max_abs_load_bias": 0.30,
                 "max_body_deformation_ratio": 0.03,
+                "care_actions": existing_actions,
+                "note": DEMO_GUIDELINE_NOTE,
             }
         )
         product_a.brand, product_a.model_name = PRODUCT_A_FINAL_IDENTITY
