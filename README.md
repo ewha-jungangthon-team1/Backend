@@ -28,7 +28,14 @@ MCM과 같은 럭셔리 가방 사용자는 높은 비용을 지불한 제품을
 
 ## 🛠️ Tech Stack
 
-![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white) ![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=white) ![Django REST Framework](https://img.shields.io/badge/Django%20REST%20Framework-ff1709?style=for-the-badge&logo=django&logoColor=white) ![SQLite](https://img.shields.io/badge/SQLite-07405E?style=for-the-badge&logo=sqlite&logoColor=white) ![PythonAnywhere](https://img.shields.io/badge/PythonAnywhere-1D9FD7?style=for-the-badge&logo=pythonanywhere&logoColor=white) ![Gabia Cloud](https://img.shields.io/badge/Gabia%20Cloud-0072CE?style=for-the-badge&logoColor=white) ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white) ![NFC](https://img.shields.io/badge/NFC--based%20Product%20Access-00599C?style=for-the-badge&logo=nfc&logoColor=white)
+| Category   | Tech Stack                                                                                                                                                                                                                              |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Language   | ![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge\&logo=python\&logoColor=white)                                                                                                                                 |
+| Framework  | ![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge\&logo=django\&logoColor=white) ![DRF](https://img.shields.io/badge/Django%20REST%20Framework-ff1709?style=for-the-badge\&logo=django\&logoColor=white)         |
+| Database   | ![SQLite](https://img.shields.io/badge/SQLite-07405E?style=for-the-badge\&logo=sqlite\&logoColor=white)                                                                                                                                 |
+| Deployment | ![PythonAnywhere](https://img.shields.io/badge/PythonAnywhere-1D9FD7?style=for-the-badge\&logo=pythonanywhere\&logoColor=white) ![Gabia Cloud](https://img.shields.io/badge/Gabia%20Cloud-0072CE?style=for-the-badge\&logoColor=white)  |
+| AI         | ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge\&logo=openai\&logoColor=white)                                                                                                                                 |
+| Interface  | ![REST API](https://img.shields.io/badge/REST%20API-009688?style=for-the-badge\&logo=fastapi\&logoColor=white) ![NFC](https://img.shields.io/badge/NFC--based%20Product%20Access-00599C?style=for-the-badge\&logo=nfc\&logoColor=white) |
 
 <br>
 
