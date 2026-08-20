@@ -19,10 +19,10 @@ MCM과 같은 럭셔리 가방 사용자는 높은 비용을 지불한 제품을
 
 ## 💻 Member
 
-| 역할 | 이름 | GitHub | 담당 |
-| --- | --- | --- | --- |
-| AI / Backend | 명아령 | [@github-id](https://github.com/github-id) | AI, 백엔드 기능 개발 |
-| Backend | 이연우 | [@github-id](https://github.com/github-id) | 백엔드 기능 개발 |
+| 역할 | 이름 | 담당 |
+| --- | --- | --- |
+| AI / Backend | 명아령 | AI, 백엔드 기능 개발 |
+| Backend | 이연우 | 백엔드 기능 개발 |
 
 <br>
 
