@@ -11,7 +11,7 @@ MCM과 같은 럭셔리 가방 사용자는 높은 비용을 지불한 제품을
 
 따라서 본 서비스는 단순한 상태 경고에 그치지 않고, **사용자가 직접 확인하기 어려운 제품의 변화를 ‘스마트소재’를 통해 먼저 감지하고 AI가 여러 데이터의 관계를 해석해 현재 가장 필요한 케어 한 가지를 제안합니다.** 또한 안내 이후에도 가방의 상태가 평소 범위로 회복되고 있는지 수치측정과 함께 사용자가 자신의 제품 상태를 지속적으로 이해하고 더 적절한 시점에 관리할 수 있도록 돕습니다. 이를 통해 **MCM의 제품 경험을 구매 시점에서 그치지 않고, 사용과 관리의 전 과정으로 확장하는 개인화된 럭셔리 케어 경험을 제공하고자 합니다.**
 <br>
-
+<br>
 🔨 **기획 · 디자인 · 개발 기간**  
 2026.07.23. - 2026.08.21.
 
@@ -28,13 +28,13 @@ MCM과 같은 럭셔리 가방 사용자는 높은 비용을 지불한 제품을
 
 ## 🛠️ Tech Stack
 
-![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white) ![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=white) ![Django REST Framework](https://img.shields.io/badge/Django%20REST%20Framework-ff1709?style=for-the-badge&logo=django&logoColor=white) ![SQLite](https://img.shields.io/badge/SQLite-07405E?style=for-the-badge&logo=sqlite&logoColor=white) ![PythonAnywhere](https://img.shields.io/badge/PythonAnywhere-1D9FD7?style=for-the-badge&logo=pythonanywhere&logoColor=white) ![Gabia Cloud](https://img.shields.io/badge/Gabia%20Cloud-0072CE?style=for-the-badge&logoColor=white) ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white) ![NFC]
+![Python](https://img.shields.io/badge/Python-3776AB?style=for-the-badge&logo=python&logoColor=white) ![Django](https://img.shields.io/badge/Django-092E20?style=for-the-badge&logo=django&logoColor=white) ![Django REST Framework](https://img.shields.io/badge/Django%20REST%20Framework-ff1709?style=for-the-badge&logo=django&logoColor=white) ![SQLite](https://img.shields.io/badge/SQLite-07405E?style=for-the-badge&logo=sqlite&logoColor=white) ![PythonAnywhere](https://img.shields.io/badge/PythonAnywhere-1D9FD7?style=for-the-badge&logo=pythonanywhere&logoColor=white) ![Gabia Cloud](https://img.shields.io/badge/Gabia%20Cloud-0072CE?style=for-the-badge&logoColor=white) ![OpenAI](https://img.shields.io/badge/OpenAI-412991?style=for-the-badge&logo=openai&logoColor=white) ![NFC](https://img.shields.io/badge/NFC--based%20Product%20Access-00599C?style=for-the-badge&logo=nfc&logoColor=white)
+
+<br>
 
 ## 📁 File Directory
 
-## 📁 File Directory
-
-\`\`\`
+```
 Backend
 ├── .github/                        # GitHub Actions 워크플로우 (CI/CD 등)
 │
@@ -133,5 +133,5 @@ Backend
 ├── PROJECT_CONTEXT.md              # 프로젝트 컨텍스트 문서
 ├── README.md
 └── requirements.txt                # 파이썬 패키지 의존성 목록
-\`\`\`
+```
 
